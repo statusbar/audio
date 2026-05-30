@@ -1,0 +1,13 @@
+# Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+#
+# Generated CMake package config for statusbar-audio.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(statusbar-core)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_dependency(ALSA)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/statusbar-audioTargets.cmake")
+check_required_components(statusbar-audio)
