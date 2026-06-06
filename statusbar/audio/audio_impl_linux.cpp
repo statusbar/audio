@@ -9,6 +9,7 @@
 #    include "statusbar/audio/audio.hpp"
 #    include "statusbar/itc/itc_published.hpp"
 #    include "statusbar/itc/itc_rt_callback_slot.hpp"
+#    include "statusbar/status/catch_or_status.hpp"
 #    include "statusbar/status/status.hpp"
 
 #    include <pthread.h>
@@ -1041,7 +1042,14 @@ struct OutputStreamLinux::Impl
         holder = std::make_unique<CallbackHolder>(std::move(callback), cb_rt, 0, config.channels);
 
         running.store(true, std::memory_order_release);
-        audio_thread = std::thread([this]() { audio_loop(); });
+        audio_thread = std::thread([this]() {
+            // Exception barrier (run_guarded): an exception escaping a thread
+            // entry calls std::terminate and aborts the process. Always mark the
+            // stream stopped on exit so a thread that died on a throw doesn't
+            // look alive.
+            run_guarded("audio thread", [this]() { audio_loop(); });
+            running.store(false, std::memory_order_release);
+        });
     }
 
     void audio_loop()
@@ -1600,7 +1608,14 @@ struct InputStreamLinux::Impl
         holder = std::make_unique<CallbackHolder>(std::move(callback), cb_rt, config.channels, 0);
 
         running.store(true, std::memory_order_release);
-        audio_thread = std::thread([this]() { audio_loop(); });
+        audio_thread = std::thread([this]() {
+            // Exception barrier (run_guarded): an exception escaping a thread
+            // entry calls std::terminate and aborts the process. Always mark the
+            // stream stopped on exit so a thread that died on a throw doesn't
+            // look alive.
+            run_guarded("audio thread", [this]() { audio_loop(); });
+            running.store(false, std::memory_order_release);
+        });
     }
 
     void audio_loop()
