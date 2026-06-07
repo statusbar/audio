@@ -262,6 +262,38 @@ TEST(osc_process, amplitude_scaling)
     EXPECT_TRUE(ratio > 1.8 && ratio < 2.2);
 }
 
+// Regression: the resonator must produce the SET amplitude for ANY initial
+// phase, not just 0 and pi. The original seed (z1=0, z2=sin(w+phase)) gave a
+// steady-state amplitude of |sin(w+phase)/sin(w)| -- ~17x too hot at phase=pi/2
+// for 440 Hz @ 48 kHz, far worse at lower w -- so phase-offset channels clipped.
+// Caught on hardware via a Meyer AAF 8-channel loopback (per-channel phase
+// 2*pi*ch/N): only ch at phase 0/pi came out correct. See the fix in
+// dsp_oscillator.hpp set_frequency().
+TEST(osc_process, unit_amplitude_for_all_phases)
+{
+    double const sample_rate = 48000.0;
+    double const freq = 440.0;
+    double const phases[] = {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0,
+        3.0 * std::numbers::pi / 4.0, std::numbers::pi};
+    for (double const phase : phases) {
+        Oscillator<double> osc;
+        osc.coeffs_.set_amplitude(1.0, 0);
+        osc.state_.set_frequency(FrequencyParameters<double>{
+            .sample_rate_recip = 1.0 / sample_rate, .frequency = freq, .phase_in_radians = phase});
+
+        double peak = 0.0;
+        for (size_t i = 0; i < 2000; ++i) {
+            double const v = osc(0.0);
+            double const a = (v < 0.0) ? -v : v;
+            if (a > peak) {
+                peak = a;
+            }
+        }
+        // Unit-amplitude sine peaks at ~1.0 for every phase.
+        EXPECT_TRUE(peak > 0.95 && peak < 1.05);
+    }
+}
+
 TEST(osc_process, adds_to_input)
 {
     Oscillator<double> osc;

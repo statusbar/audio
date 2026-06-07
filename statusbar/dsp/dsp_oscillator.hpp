@@ -102,9 +102,17 @@ struct Oscillator
         void set_frequency(FrequencyParameters<U> params, size_t channel = 0) noexcept
         {
             U w = constants::two_pi<U>() * params.frequency * params.sample_rate_recip;
-            U temp2 = std::sin(w + params.phase_in_radians);
+            // Seed the 2-pole resonator with the two prior outputs of a UNIT
+            // sine at the requested phase: z1 = sin(phase) [y(-1)], z2 =
+            // sin(phase - w) [y(-2)]. Then o(n) = sin((n+1)w + phase) with
+            // amplitude exactly 1 for every phase. The previous seed (z1=0,
+            // z2=sin(w+phase)) gave amplitude |sin(w+phase)/sin(w)|, which is 1
+            // only near phase 0 or pi and blows up (~sin(phase)/sin(w)) for
+            // other phases at low w -> clipping on phase-offset channels.
+            U temp1 = std::sin(params.phase_in_radians);
+            U temp2 = std::sin(params.phase_in_radians - w);
             U tempa = constants::two<U>() * std::cos(w);
-            auto const nz1 = constants::zero<item_type>();
+            auto const nz1 = static_cast<item_type>(temp1);
             auto const nz2 = static_cast<item_type>(temp2);
             auto const na = static_cast<item_type>(tempa);
             set_flattened_item(z1_, nz1, channel);
