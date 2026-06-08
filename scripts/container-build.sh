@@ -111,6 +111,7 @@ echo "=== building statusbar-$PKG .deb packages (Debian $DEBIAN_VERSION) ==="
     cmake -Wno-dev -S /src -B /build -G Ninja \
       --toolchain /src/cmake/toolchain-clang.cmake \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DENABLE_FUZZING=OFF \
       -DCMAKE_C_COMPILER_LAUNCHER=ccache \
       -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
     cmake --build /build
