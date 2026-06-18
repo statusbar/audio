@@ -22,9 +22,9 @@ TARGET_ARCH="${TARGET_PLATFORM##*/}"
 IMAGE="localhost/statusbar-deb-builder:$DEBIAN_VERSION-$TARGET_ARCH"
 
 # Debian package revision: a monotonic build id appended as the package's Debian
-# revision (version becomes 1.1.0-<rev>), so every rebuild produces a
+# revision (version becomes 1.2.0-<rev>), so every rebuild produces a
 # strictly-newer package and `apt-get install` always upgrades it instead of
-# skipping a same-version reinstall. The upstream version (1.1.0) is bumped only
+# skipping a same-version reinstall. The upstream version (1.2.0) is bumped only
 # on real releases. Overridable; the umbrella container-build.sh sets one shared
 # value per run so a multi-package build gets a consistent revision.
 DEB_REVISION="${STATUSBAR_DEB_REVISION:-$(date -u +%Y%m%d%H%M%S)}"
