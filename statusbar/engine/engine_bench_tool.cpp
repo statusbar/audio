@@ -469,11 +469,10 @@ static void bench_designers()
             "biquad_designer/step_f32_morphing",
             [&]() {
                 // Push a new target each step to keep the morph machine busy
-                in_pipe.publish(
-                    statusbar::dsp::BiquadDesignParams{
-                        .type = statusbar::dsp::BiquadFilterType::Lowpass,
-                        .frequency_hz = flip ? 1000.0 : 4000.0,
-                    });
+                in_pipe.publish(statusbar::dsp::BiquadDesignParams{
+                    .type = statusbar::dsp::BiquadFilterType::Lowpass,
+                    .frequency_hz = flip ? 1000.0 : 4000.0,
+                });
                 flip = !flip;
                 d.step(EC::recip_samples_per_leg_f);
                 (void)out_pipe.try_consume();
@@ -498,11 +497,10 @@ static void bench_designers()
             "biquad_designer/step_f32x4_morphing",
             [&]() {
                 for (size_t ch = 0; ch < 4; ++ch) {
-                    in_pipes[ch].publish(
-                        statusbar::dsp::BiquadDesignParams{
-                            .type = statusbar::dsp::BiquadFilterType::Lowpass,
-                            .frequency_hz = flip ? 1000.0 + 500.0 * ch : 4000.0 - 500.0 * ch,
-                        });
+                    in_pipes[ch].publish(statusbar::dsp::BiquadDesignParams{
+                        .type = statusbar::dsp::BiquadFilterType::Lowpass,
+                        .frequency_hz = flip ? 1000.0 + 500.0 * ch : 4000.0 - 500.0 * ch,
+                    });
                 }
                 flip = !flip;
                 d.step(EC::recip_samples_per_leg_f);

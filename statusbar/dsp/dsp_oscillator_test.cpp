@@ -273,13 +273,12 @@ TEST(osc_process, unit_amplitude_for_all_phases)
 {
     double const sample_rate = 48000.0;
     double const freq = 440.0;
-    double const phases[] = {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0,
-        3.0 * std::numbers::pi / 4.0, std::numbers::pi};
+    double const phases[] = {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0, 3.0 * std::numbers::pi / 4.0, std::numbers::pi};
     for (double const phase : phases) {
         Oscillator<double> osc;
         osc.coeffs_.set_amplitude(1.0, 0);
-        osc.state_.set_frequency(FrequencyParameters<double>{
-            .sample_rate_recip = 1.0 / sample_rate, .frequency = freq, .phase_in_radians = phase});
+        osc.state_.set_frequency(
+            FrequencyParameters<double>{.sample_rate_recip = 1.0 / sample_rate, .frequency = freq, .phase_in_radians = phase});
 
         double peak = 0.0;
         for (size_t i = 0; i < 2000; ++i) {
@@ -330,9 +329,8 @@ TEST(osc_process, phase_offset)
         FrequencyParameters<double>{.sample_rate_recip = 1.0 / sample_rate, .frequency = freq, .phase_in_radians = 0.0});
 
     osc_quarter.coeffs_.set_amplitude(1.0, 0);
-    osc_quarter.state_.set_frequency(
-        FrequencyParameters<double>{
-            .sample_rate_recip = 1.0 / sample_rate, .frequency = freq, .phase_in_radians = std::numbers::pi / 2.0});
+    osc_quarter.state_.set_frequency(FrequencyParameters<double>{
+        .sample_rate_recip = 1.0 / sample_rate, .frequency = freq, .phase_in_radians = std::numbers::pi / 2.0});
 
     // First sample should be different due to phase offset
     double sample_zero = osc_zero(0.0);

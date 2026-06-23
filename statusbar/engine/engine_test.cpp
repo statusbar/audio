@@ -673,9 +673,8 @@ TEST(engine_biquad_designer, set_initial_publishes_hold_segment_on_first_step)
     LatestPipe<Segment<BiquadComplexCoeffs<float>>> out_pipe;
     designer.connect_output(out_pipe);
 
-    designer.set_initial(
-        statusbar::dsp::BiquadDesignParams{
-            .type = statusbar::dsp::BiquadFilterType::Lowpass, .frequency_hz = 1000.0, .q = 0.707, .gain_db = 0.0});
+    designer.set_initial(statusbar::dsp::BiquadDesignParams{
+        .type = statusbar::dsp::BiquadFilterType::Lowpass, .frequency_hz = 1000.0, .q = 0.707, .gain_db = 0.0});
 
     EXPECT_EQ(designer.legs_remaining(0), 0U);
     designer.step(Engine48k::recip_samples_per_leg_f);

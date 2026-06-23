@@ -41,7 +41,7 @@ template <typename C>
 concept SegmentableCoeffs = requires(C const& a, C const& b, float s) {
     { a + b } -> std::same_as<C>;
     { a - b } -> std::same_as<C>;
-    { a * s } -> std::same_as<C>;
+    { a* s } -> std::same_as<C>;
 };
 
 // Construct a segment from start + end + recip_N. Tier 2 calls this once
