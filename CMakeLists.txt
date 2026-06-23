@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 project(
   statusbar-audio
-  VERSION 1.2.0
+  VERSION 1.3.0
   LANGUAGES CXX)
 
 include(GNUInstallDirs)
@@ -95,7 +95,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/statusbar-audio)
   write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/statusbar-audioConfigVersion.cmake
-    VERSION 1.2.0
+    VERSION 1.3.0
     COMPATIBILITY AnyNewerVersion)
   install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/statusbar-audioConfig.cmake
@@ -120,7 +120,7 @@ endif()
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_PACKAGE_NAME "statusbar-audio")
   set(CPACK_PACKAGE_VENDOR "Jeff Koftinoff")
-  set(CPACK_PACKAGE_VERSION "1.2.0")
+  set(CPACK_PACKAGE_VERSION "1.3.0")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "Audio toolkit — DSP primitives, the real-time data-flow engine, low-latency cross-platform audio I/O, SMPTE timecode, MIDI, and Open Sound Control."
   )
@@ -149,12 +149,12 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_DEBIAN_DEVEL_PACKAGE_NAME "statusbar-audio-dev")
   set(CPACK_RPM_DEVEL_PACKAGE_NAME "statusbar-audio-devel")
   # -dev pulls its own runtime so its cmake config's IMPORTED targets resolve.
-  # >= (not =) so an auto-incremented Debian revision (1.2.0-<rev>) still
+  # >= (not =) so an auto-incremented Debian revision (1.3.0-<rev>) still
   # satisfies the cross-dependencies.
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
-      "statusbar-audio (>= 1.2.0), statusbar-core-dev (>= 1.2.0)")
+      "statusbar-audio (>= 1.3.0), statusbar-core-dev (>= 1.3.0)")
   set(CPACK_RPM_DEVEL_PACKAGE_REQUIRES
-      "statusbar-audio >= 1.2.0, statusbar-core-devel >= 1.2.0")
+      "statusbar-audio >= 1.3.0, statusbar-core-devel >= 1.3.0")
   set(CPACK_COMPONENT_DEVEL_DESCRIPTION
       "C++ headers, static libraries and CMake package config")
   set(CPACK_GENERATOR "TGZ;ZIP")
