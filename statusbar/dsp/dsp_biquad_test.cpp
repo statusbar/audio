@@ -638,6 +638,36 @@ TEST(biquad_z_domain, bypass_zero_phase)
     }
 }
 
+TEST(biquad_z_domain, simd_process_z_domain_compiles_and_matches)
+{
+    // process_z_domain must instantiate for a SIMD T (the per-channel response
+    // is scalar item_type, not the vector T). Set one lane to bypass and check
+    // its unity response.
+    BiQuad<simd_float32x4> filter;
+    filter.coeffs.set_bypass(0);
+    filter.coeffs.set_bypass(2);
+
+    auto const z1 = std::complex<float>(std::cos(-0.3F), std::sin(-0.3F));
+    auto const r0 = filter.coeffs.process_z_domain(z1, 0);
+    auto const r2 = filter.coeffs.process_z_domain(z1, 2);
+    EXPECT_TRUE(approx_equal(std::abs(r0), 1.0F, 1e-5F));
+    EXPECT_TRUE(approx_equal(std::abs(r2), 1.0F, 1e-5F));
+}
+
+TEST(biquad_design, extreme_frequencies_stay_finite)
+{
+    // Frequencies at/above Nyquist and at/below DC must not yield inf/NaN
+    // coefficients (the prewarp clamps the normalized frequency).
+    constexpr double sr_recip = 1.0 / 48000.0;
+    for (double freq : {0.0, -100.0, 24000.0, 24000.0 * 2.0, 1e9}) {
+        for (auto const design : {&design_lowpass, &design_highpass, &design_bandpass, &design_notch}) {
+            auto const c = design(FilterParams<>{.sample_rate_recip = sr_recip, .frequency = freq, .q = 0.707});
+            EXPECT_TRUE(std::isfinite(c.a0) && std::isfinite(c.a1) && std::isfinite(c.a2));
+            EXPECT_TRUE(std::isfinite(c.b1) && std::isfinite(c.b2));
+        }
+    }
+}
+
 TEST(biquad_z_domain, lowpass_cutoff_minus_3db)
 {
     BiQuad<double> filter;

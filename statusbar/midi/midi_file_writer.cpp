@@ -3,6 +3,9 @@
 
 #include "statusbar/midi/midi_file_writer.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
+
 #include <array>
 #include <cstdint>
 #include <span>
@@ -14,23 +17,19 @@ auto MidiFileWriter::append_byte(uint8_t val) -> Status
     return output_.append(std::span<uint8_t const>(&val, 1));
 }
 
+// SMF multi-byte fields are big-endian; ieee::doublet_t / quadlet_t hold network
+// byte order and span_store writes their raw bytes.
 auto MidiFileWriter::append_u16(uint16_t val) -> Status
 {
-    std::array<uint8_t, 2> buf = {
-        static_cast<uint8_t>(val >> 8),
-        static_cast<uint8_t>(val & 0xFF),
-    };
+    std::array<uint8_t, 2> buf{};
+    span_store(buf, statusbar::ieee::doublet_t{val});
     return output_.append(std::span<uint8_t const>(buf));
 }
 
 auto MidiFileWriter::append_u32(uint32_t val) -> Status
 {
-    std::array<uint8_t, 4> buf = {
-        static_cast<uint8_t>(val >> 24),
-        static_cast<uint8_t>((val >> 16) & 0xFF),
-        static_cast<uint8_t>((val >> 8) & 0xFF),
-        static_cast<uint8_t>(val & 0xFF),
-    };
+    std::array<uint8_t, 4> buf{};
+    span_store(buf, statusbar::ieee::quadlet_t{val});
     return output_.append(std::span<uint8_t const>(buf));
 }
 
@@ -96,12 +95,8 @@ auto MidiFileWriter::end_track() -> Status
     }
 
     auto const track_length = static_cast<uint32_t>(output_.size() - track_data_start_);
-    std::array<uint8_t, 4> len_bytes = {
-        static_cast<uint8_t>(track_length >> 24),
-        static_cast<uint8_t>((track_length >> 16) & 0xFF),
-        static_cast<uint8_t>((track_length >> 8) & 0xFF),
-        static_cast<uint8_t>(track_length & 0xFF),
-    };
+    std::array<uint8_t, 4> len_bytes{};
+    span_store(len_bytes, statusbar::ieee::quadlet_t{track_length});
     auto const s = output_.store(track_length_offset_, std::span<uint8_t const>(len_bytes));
     if (is_failure(s)) {
         return s;
@@ -154,10 +149,13 @@ auto MidiFileWriter::write_message(MidiTick time, MidiMessage const& msg) -> Sta
     return success();
 }
 
-auto MidiFileWriter::write_sysex(MidiTick time, std::span<uint8_t const> data) -> Status
+auto MidiFileWriter::write_sysex(MidiTick time, std::span<uint8_t const> data, uint8_t status) -> Status
 {
     if (!in_track_) {
         return failure(MidiError::malformed_file);
+    }
+    if (status != 0xF0 && status != 0xF7) {
+        return failure(MidiError::invalid_status);
     }
 
     auto s = write_delta_time(time);
@@ -167,7 +165,7 @@ auto MidiFileWriter::write_sysex(MidiTick time, std::span<uint8_t const> data) -
 
     running_status_ = 0;
 
-    s = append_byte(0xF0);
+    s = append_byte(status);
     if (is_failure(s)) {
         return s;
     }

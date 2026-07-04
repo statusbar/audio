@@ -31,6 +31,8 @@ auto OscErrorCategory::message(int ev) const -> std::string
             return "OSC argument type mismatch";
         case OscError::invalid_message:
             return "Invalid OSC message format";
+        case OscError::bundle_too_deep:
+            return "OSC bundle nesting too deep";
         default:
             return "Unknown OSC error";
     }

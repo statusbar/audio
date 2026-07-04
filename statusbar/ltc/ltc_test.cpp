@@ -553,6 +553,69 @@ TEST(frame, drop_frame_flag)
     EXPECT_TRUE(frame_df.get_bit(10));
 }
 
+namespace {
+// Count one-bits across the whole 80-bit frame via the public bit accessor.
+auto frame_one_bits(LTCFrame const& frame) -> size_t
+{
+    size_t ones = 0;
+    for (size_t i = 0; i < 80; ++i) {
+        if (frame.get_bit(i)) {
+            ++ones;
+        }
+    }
+    return ones;
+}
+}  // namespace
+
+TEST(frame, polarity_even_parity_all_rates)
+{
+    // SMPTE 12M: the polarity-correction bit must make the entire 80-bit frame
+    // contain an even number of one-bits (so every frame's biphase waveform
+    // starts at the same polarity). Exercise every rate across a spread of
+    // timecodes and user-bit patterns — the sync word alone carries an odd 13
+    // ones, so an implementation that forgets to include it (or the user bits)
+    // fails here.
+    FrameRate const rates[] = {
+        FrameRate::Rate_23_976, FrameRate::Rate_24,        FrameRate::Rate_25,    FrameRate::Rate_29_97_DF,
+        FrameRate::Rate_29_97_NDF, FrameRate::Rate_30_DF,  FrameRate::Rate_30_NDF};
+    uint32_t const user_bit_patterns[] = {0x00000000u, 0xFFFFFFFFu, 0xA5A5A5A5u, 0x12345678u};
+
+    for (auto const rate : rates) {
+        for (auto const ubits : user_bit_patterns) {
+            for (uint8_t h = 0; h < 24; h += 7) {
+                for (uint8_t s = 0; s < 60; s += 13) {
+                    Timecode tc{
+                        .hours = h, .minutes = 45, .seconds = s, .frames = 12, .user_bits = ubits, .rate = rate};
+                    LTCFrame frame(tc);
+                    EXPECT_EQ(frame_one_bits(frame) % 2, size_t{0});
+                }
+            }
+        }
+    }
+}
+
+TEST(frame, polarity_bit_position_by_rate)
+{
+    // At 25 fps the correction bit is 27; bit 59 is a binary-group flag and must
+    // stay 0. At every other rate the correction bit is 59; bit 27 (BGF0) stays
+    // 0. Pick a timecode whose other 79 bits have odd parity so the correction
+    // bit is actually driven to 1.
+    // 25 fps: correction at bit 27.
+    {
+        Timecode tc{.hours = 1, .minutes = 0, .seconds = 0, .frames = 1, .rate = FrameRate::Rate_25};
+        LTCFrame frame(tc);
+        EXPECT_EQ(frame_one_bits(frame) % 2, size_t{0});
+        EXPECT_FALSE(frame.get_bit(59));  // bit 59 is a BGF at 25 fps, never the correction bit
+    }
+    // 30 fps: correction at bit 59.
+    {
+        Timecode tc{.hours = 1, .minutes = 0, .seconds = 0, .frames = 1, .rate = FrameRate::Rate_30_NDF};
+        LTCFrame frame(tc);
+        EXPECT_EQ(frame_one_bits(frame) % 2, size_t{0});
+        EXPECT_FALSE(frame.get_bit(27));  // bit 27 is BGF0 at 30 fps, never the correction bit
+    }
+}
+
 TEST(frame, data_accessor)
 {
     Timecode tc{.hours = 12, .minutes = 34, .seconds = 56, .frames = 23, .rate = FrameRate::Rate_30_NDF};
@@ -677,6 +740,30 @@ TEST(generator, transitions)
 
     // Should have many samples in transition with 100µs rise time
     EXPECT_TRUE(transition_samples > 100);
+}
+
+TEST(generator, frame_boundary_continuity)
+{
+    // Consecutive frames must join without a waveform discontinuity: the last
+    // sample of one frame equals the first sample of the next (both sit at the
+    // carried biphase level). A generator that reset its level every frame would
+    // jump here whenever a frame ended on the opposite polarity.
+    Generator gen(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);
+    Timecode tc{.hours = 10, .minutes = 20, .seconds = 30, .frames = 0, .rate = FrameRate::Rate_30_NDF};
+
+    std::vector<float> prev;
+    prev.reserve(gen.samples_per_frame());
+    gen.generate_frame(tc, prev);
+
+    for (int i = 0; i < 8; ++i) {
+        tc.increment_frame();
+        std::vector<float> cur;
+        cur.reserve(gen.samples_per_frame());
+        gen.generate_frame(tc, cur);
+        EXPECT_FALSE(cur.empty());
+        EXPECT_EQ(prev.back(), cur.front());
+        prev = std::move(cur);
+    }
 }
 
 TEST(generator, rise_time)
@@ -870,6 +957,46 @@ TEST(servo, reset_accumulated_error)
     // The adjustment after reset should be smaller than before reset
     // because there's no accumulated integral error
     EXPECT_TRUE(adj_after_reset < adj_before_reset);
+}
+
+TEST(servo, anti_windup_recovers_quickly)
+{
+    // Drive a large sustained error so the output saturates at the +0.1% clamp.
+    // Without anti-windup the integrator would wind up huge and stay saturated
+    // long after the error reverses; with conditional integration it recovers
+    // within a couple of updates.
+    ServoGenerator servo(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);
+    for (int i = 0; i < 100; ++i) {
+        servo.update_timing(1.0, 0.0);  // huge positive error → saturates high
+    }
+    EXPECT_TRUE(servo.phase_adjustment() >= 1.001 - 1e-9);
+
+    // Reverse the error; a wound-up integrator would keep the output pinned high.
+    servo.update_timing(0.0, 1.0);
+    EXPECT_TRUE(servo.phase_adjustment() < 1.001);
+    servo.update_timing(0.0, 1.0);
+    EXPECT_TRUE(servo.phase_adjustment() <= 0.999 + 1e-9);
+}
+
+TEST(servo, get_samples_preserves_subsample_phase)
+{
+    // Consuming the same span in one big chunk vs many small chunks must land at
+    // the same timecode — the fractional read position persists across calls,
+    // so per-callback quantization can't accumulate a bias.
+    auto const total = size_t{48000};
+    ServoGenerator servo_a(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);
+    ServoGenerator servo_b(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);
+    Timecode const tc{.hours = 1, .rate = FrameRate::Rate_30_NDF};
+    servo_a.set_timecode(tc);
+    servo_b.set_timecode(tc);
+
+    std::vector<float> out;
+    out.reserve(total);
+    servo_a.get_samples(total, out);
+    for (size_t done = 0; done < total; done += 37) {
+        servo_b.get_samples(std::min<size_t>(37, total - done), out);
+    }
+    EXPECT_TRUE(servo_a.current_timecode() == servo_b.current_timecode());
 }
 
 TEST(servo_interpolate, within_bounds)

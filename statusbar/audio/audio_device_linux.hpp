@@ -117,6 +117,12 @@ class OutputStreamLinux : public OutputStream
     /// Typically a multiple of effective_period_frames().
     [[nodiscard]] auto effective_buffer_frames() const noexcept -> uint32_t override;
 
+    /// Number of ALSA xruns recovered from since start.
+    [[nodiscard]] auto xrun_count() const noexcept -> uint64_t override;
+
+    /// Reason the stream last errored or self-stopped.
+    [[nodiscard]] auto last_error() const noexcept -> AudioError override;
+
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -178,6 +184,12 @@ class InputStreamLinux : public InputStream
     /// Get the actual total buffer size in frames negotiated with ALSA.
     /// Typically a multiple of effective_period_frames().
     [[nodiscard]] auto effective_buffer_frames() const noexcept -> uint32_t override;
+
+    /// Number of ALSA xruns recovered from since start.
+    [[nodiscard]] auto xrun_count() const noexcept -> uint64_t override;
+
+    /// Reason the stream last errored or self-stopped.
+    [[nodiscard]] auto last_error() const noexcept -> AudioError override;
 
   private:
     struct Impl;

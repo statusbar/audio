@@ -29,7 +29,11 @@ class MidiFileWriter
     [[nodiscard]] auto end_track() -> Status;
 
     [[nodiscard]] auto write_message(MidiTick time, MidiMessage const& msg) -> Status;
-    [[nodiscard]] auto write_sysex(MidiTick time, std::span<uint8_t const> data) -> Status;
+    /// Write a sysex event. `status` is the leading status byte: 0xF0 for a
+    /// normal sysex, 0xF7 for an escape/continuation event — preserving it lets
+    /// a read→write pipeline round-trip F7 events instead of rewriting them as
+    /// F0. `data` is the payload (including any trailing 0xF7 the caller wants).
+    [[nodiscard]] auto write_sysex(MidiTick time, std::span<uint8_t const> data, uint8_t status = 0xF0) -> Status;
     [[nodiscard]] auto write_meta(MidiTick time, uint8_t meta_type, std::span<uint8_t const> data) -> Status;
 
     [[nodiscard]] auto write_tempo(MidiTick time, uint32_t us_per_beat) -> Status;

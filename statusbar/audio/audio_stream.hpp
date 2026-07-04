@@ -7,9 +7,11 @@
 // Cross-platform audio stream interface
 
 #include "statusbar/audio/audio_device.hpp"
+#include "statusbar/audio/audio_error.hpp"
 #include "statusbar/audio/audio_types.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <string_view>
 
@@ -92,6 +94,16 @@ class OutputStream
     /// Get device info
     [[nodiscard]] virtual auto device() const noexcept -> DeviceInfo const& = 0;
 
+    /// Number of buffer xruns (underruns) observed since start. Lets a caller
+    /// detect glitches the stream recovered from internally. Default 0 for
+    /// backends that don't track it.
+    [[nodiscard]] virtual auto xrun_count() const noexcept -> uint64_t { return 0; }
+
+    /// The reason the stream last errored or self-stopped (AudioError::None if
+    /// none). Poll after is_running() flips to false to distinguish a callback
+    /// failure / denied realtime priority / device loss.
+    [[nodiscard]] virtual auto last_error() const noexcept -> AudioError { return AudioError::None; }
+
     virtual ~OutputStream() noexcept = default;
 
   protected:
@@ -150,6 +162,16 @@ class InputStream
 
     /// Get device info
     [[nodiscard]] virtual auto device() const noexcept -> DeviceInfo const& = 0;
+
+    /// Number of buffer xruns (overruns) observed since start. Lets a caller
+    /// detect glitches the stream recovered from internally. Default 0 for
+    /// backends that don't track it.
+    [[nodiscard]] virtual auto xrun_count() const noexcept -> uint64_t { return 0; }
+
+    /// The reason the stream last errored or self-stopped (AudioError::None if
+    /// none). Poll after is_running() flips to false to distinguish a callback
+    /// failure / denied realtime priority / device loss.
+    [[nodiscard]] virtual auto last_error() const noexcept -> AudioError { return AudioError::None; }
 
     virtual ~InputStream() noexcept = default;
 

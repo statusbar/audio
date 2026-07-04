@@ -109,7 +109,10 @@ class MidiParser
     {
         switch (state_) {
             case State::find_status:
-                if (running_status_ != 0) {
+                // Running status only applies to channel-voice messages
+                // (0x80-0xEF). A system-common status (0xF0-0xF7) cancels running
+                // status, so a following data byte must not reuse it.
+                if (running_status_ != 0 && running_status_ < 0xF0) {
                     auto const count = data_byte_count(running_status_);
                     if (count == 2) {
                         data1_ = byte;

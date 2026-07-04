@@ -26,8 +26,9 @@ enum class AudioError : uint32_t
     UnsupportedFormat = 8,      ///< Sample format not supported
     UnsupportedSampleRate = 9,  ///< Sample rate not supported
     StreamNotRunning = 10,      ///< Operation requires running stream
-    AlreadyRunning = 11,        ///< Stream is already running
-    InitializationFailed = 12   ///< Failed to initialize audio system
+    AlreadyRunning = 11,          ///< Stream is already running
+    InitializationFailed = 12,    ///< Failed to initialize audio system
+    RealtimePriorityDenied = 13,  ///< Could not obtain the requested realtime thread priority
 };
 
 /// Error category for audio errors

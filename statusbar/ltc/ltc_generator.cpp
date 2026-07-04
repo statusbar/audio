@@ -35,8 +35,12 @@ auto Generator::generate_frame(Timecode const& tc, std::vector<float>& samples) 
     LTCFrame const frame(tc);
     samples.clear();
 
-    // Current level (-1.0 or +1.0)
-    float level = 1.0F;
+    // Current level (-1.0 or +1.0), carried from the previous frame so the
+    // biphase waveform is continuous across frame boundaries. With a spec-correct
+    // polarity-correction bit each frame has an even transition count, so this
+    // returns to last_level_ at the end and the stream never doubles a boundary
+    // transition.
+    float level = last_level_;
     float prev_level = level;
 
     // Sample position within current bit
@@ -89,6 +93,9 @@ auto Generator::generate_frame(Timecode const& tc, std::vector<float>& samples) 
 
     // Truncate if we generated too many samples
     samples.resize(samples_per_frame_);
+
+    // Carry the ending level into the next frame for boundary continuity.
+    last_level_ = level;
 }
 
 }  // namespace statusbar::ltc

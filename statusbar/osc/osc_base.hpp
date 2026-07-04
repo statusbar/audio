@@ -29,6 +29,9 @@ constexpr size_t OSC_MAX_ADDRESS_LENGTH = 256;
 /// Maximum type tag string length
 constexpr size_t OSC_MAX_TYPETAGS = 128;
 
+/// Maximum nesting depth for bundles-within-bundles (stack-overflow guard).
+constexpr size_t OSC_MAX_BUNDLE_DEPTH = 32;
+
 //
 // OSC Type Tags
 //

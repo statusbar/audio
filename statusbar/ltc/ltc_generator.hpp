@@ -53,6 +53,10 @@ class Generator
     /// Get number of samples per bit (may be fractional)
     [[nodiscard]] constexpr auto samples_per_bit() const noexcept -> double { return samples_per_bit_; }
 
+    /// Reset biphase level continuity to a known start polarity. Call when
+    /// starting a fresh, non-contiguous stream so the first frame is deterministic.
+    constexpr auto reset() noexcept -> void { last_level_ = 1.0F; }
+
   private:
     /// Apply rise/fall time shaping using linear interpolation
     /// @param from_level Starting level
@@ -77,6 +81,7 @@ class Generator
     uint32_t samples_per_frame_;  // Samples per video frame
     double samples_per_bit_;      // Samples per LTC bit
     size_t rise_time_samples_;    // Rise/fall time in samples (SMPTE 12M: 25-250µs)
+    float last_level_ = 1.0F;     // Biphase signal level carried across frames for continuity
 };
 
 }  // namespace statusbar::ltc

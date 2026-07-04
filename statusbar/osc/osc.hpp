@@ -22,7 +22,7 @@
 ///
 /// Example usage:
 /// @code
-/// import statusbar.osc;
+/// #include "statusbar/osc/osc.hpp"
 ///
 /// // Create a message
 /// statusbar::osc::OscMessage msg{"/synth/frequency"};

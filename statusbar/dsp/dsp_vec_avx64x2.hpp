@@ -23,23 +23,13 @@ namespace statusbar::dsp {
 /// This template specialization provides optimized SIMD operations
 /// using Intel SSE2 intrinsics for 2-element double vectors (128-bit XMM registers).
 template <>
-class alignas(simd_alignment<double, 2>()) SIMDVec<double, 2>
+class alignas(simd_alignment<double, 2>()) SIMDVec<double, 2> : public SIMDVecContainer<double, 2>
 {
   public:
     using simd_type = SIMDVec<double, 2>;
     using internal_type = __m128d;
-    using value_type = double;
-
-    using pointer = value_type*;
-    using const_pointer = value_type const*;
-    using reference = value_type&;
-    using const_reference = value_type const&;
-    using iterator = pointer;
-    using const_iterator = const_pointer;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-
-    static constexpr size_type vector_size = 2;
+    // value_type / size_type / vector_size and the container/iterator interface
+    // come from SIMDVecContainer.
 
     union
     {
@@ -84,15 +74,6 @@ class alignas(simd_alignment<double, 2>()) SIMDVec<double, 2>
     /// Move assignment operator
     constexpr simd_type& operator=(simd_type&& other) noexcept = default;
 
-    /// Get the vector size
-    [[nodiscard]] static constexpr size_type size() noexcept { return vector_size; }
-
-    /// Get the vector maximum size
-    [[nodiscard]] static constexpr size_type max_size() noexcept { return vector_size; }
-
-    /// Vector is never empty
-    [[nodiscard]] static constexpr bool empty() noexcept { return false; }
-
     /// Create a zero-initialized vector
     [[nodiscard]] static simd_type zero() noexcept
     {
@@ -127,66 +108,6 @@ class alignas(simd_alignment<double, 2>()) SIMDVec<double, 2>
         vec_ = other.vec_;
         other.vec_ = temp;
     }
-
-    /// Get pointer to underlying array
-    [[nodiscard]] constexpr pointer data() noexcept { return item_; }
-
-    /// Get const pointer to underlying array
-    [[nodiscard]] constexpr const_pointer data() const noexcept { return item_; }
-
-    /// Array subscript operator (const)
-    [[nodiscard]] constexpr const_reference operator[](size_type index) const noexcept { return item_[index]; }
-
-    /// Array subscript operator (non-const)
-    [[nodiscard]] constexpr reference operator[](size_type index) noexcept { return item_[index]; }
-
-    /// Bounds-checked element access (const)
-    [[nodiscard]] const_reference at(size_type index) const
-    {
-        if (index >= vector_size) {
-            detail::out_of_range("SIMDVec index out of range");
-        }
-        return item_[index];
-    }
-
-    /// Bounds-checked element access (non-const)
-    [[nodiscard]] reference at(size_type index)
-    {
-        if (index >= vector_size) {
-            detail::out_of_range("SIMDVec index out of range");
-        }
-        return item_[index];
-    }
-
-    /// Get the first element
-    [[nodiscard]] constexpr reference front() noexcept { return item_[0]; }
-
-    /// Get the first element (const)
-    [[nodiscard]] constexpr const_reference front() const noexcept { return item_[0]; }
-
-    /// Get the last element
-    [[nodiscard]] constexpr reference back() noexcept { return item_[vector_size - 1]; }
-
-    /// Get the last element (const)
-    [[nodiscard]] constexpr const_reference back() const noexcept { return item_[vector_size - 1]; }
-
-    /// Iterator to beginning
-    [[nodiscard]] constexpr iterator begin() noexcept { return item_; }
-
-    /// Const iterator to beginning
-    [[nodiscard]] constexpr const_iterator begin() const noexcept { return item_; }
-
-    /// Const iterator to beginning
-    [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return item_; }
-
-    /// Iterator to end
-    [[nodiscard]] constexpr iterator end() noexcept { return item_ + vector_size; }
-
-    /// Const iterator to end
-    [[nodiscard]] constexpr const_iterator end() const noexcept { return item_ + vector_size; }
-
-    /// Const iterator to end
-    [[nodiscard]] constexpr const_iterator cend() const noexcept { return item_ + vector_size; }
 
     // Horizontal Reduction Operations
 

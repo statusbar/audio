@@ -127,6 +127,24 @@ TEST(cbiquad_match, lowpass)
     compare_biquad_vs_complex("lowpass", a0, a1, a2, b1, b2);
 }
 
+TEST(cbiquad_match, negative_a0)
+{
+    // Sign-inverted numerator (negative leading coefficient): the two-stage
+    // factorization carries the sign in one stage (g = sqrt(|a0|)), where a
+    // plain sqrt(a0) would be NaN. Output must still match the reference biquad.
+    constexpr double sr = 48000.0;
+    constexpr double freq = 1000.0;
+    constexpr double q = 0.707;
+    double const k = std::tan(std::numbers::pi * freq / sr);
+    double const norm = 1.0 / (1.0 + (k / q) + (k * k));
+    double const a0 = -(k * k) * norm;
+    double const a1 = 2.0 * a0;
+    double const a2 = a0;
+    double const b1 = 2.0 * ((k * k) - 1.0) * norm;
+    double const b2 = (1.0 - (k / q) + (k * k)) * norm;
+    compare_biquad_vs_complex("negative_a0", a0, a1, a2, b1, b2);
+}
+
 TEST(cbiquad_match, highpass)
 {
     constexpr double sr = 48000.0;

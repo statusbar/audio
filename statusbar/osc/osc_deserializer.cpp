@@ -29,16 +29,17 @@ auto osc_is_message(std::span<uint8_t const> data) noexcept -> bool
     return data[0] == '/';
 }
 
+// OSC integers/floats are big-endian on the wire. ieee::quadlet_t / octlet_t
+// hold network byte order and convert to host on read; span_load fills their
+// raw bytes. Same primitives the timetag path already uses.
 auto load_int32(std::span<uint8_t const> buffer, int32_t& value) noexcept -> StatusValue<size_t>
 {
     if (buffer.size() < 4) {
         return failure(OscError::buffer_underflow);
     }
-
-    uint32_t const u = (static_cast<uint32_t>(buffer[0]) << 24) | (static_cast<uint32_t>(buffer[1]) << 16) |
-        (static_cast<uint32_t>(buffer[2]) << 8) | static_cast<uint32_t>(buffer[3]);
-
-    value = static_cast<int32_t>(u);
+    statusbar::ieee::quadlet_t q{};
+    span_load(q, buffer.subspan(0, 4));
+    value = static_cast<int32_t>(static_cast<uint32_t>(q));
     return success(size_t{4});
 }
 
@@ -47,11 +48,9 @@ auto load_float32(std::span<uint8_t const> buffer, float& value) noexcept -> Sta
     if (buffer.size() < 4) {
         return failure(OscError::buffer_underflow);
     }
-
-    uint32_t const bits = (static_cast<uint32_t>(buffer[0]) << 24) | (static_cast<uint32_t>(buffer[1]) << 16) |
-        (static_cast<uint32_t>(buffer[2]) << 8) | static_cast<uint32_t>(buffer[3]);
-
-    value = std::bit_cast<float>(bits);
+    statusbar::ieee::quadlet_t q{};
+    span_load(q, buffer.subspan(0, 4));
+    value = std::bit_cast<float>(static_cast<uint32_t>(q));
     return success(size_t{4});
 }
 
@@ -60,13 +59,9 @@ auto load_int64(std::span<uint8_t const> buffer, int64_t& value) noexcept -> Sta
     if (buffer.size() < 8) {
         return failure(OscError::buffer_underflow);
     }
-
-    uint64_t const u = (static_cast<uint64_t>(buffer[0]) << 56) | (static_cast<uint64_t>(buffer[1]) << 48) |
-        (static_cast<uint64_t>(buffer[2]) << 40) | (static_cast<uint64_t>(buffer[3]) << 32) |
-        (static_cast<uint64_t>(buffer[4]) << 24) | (static_cast<uint64_t>(buffer[5]) << 16) |
-        (static_cast<uint64_t>(buffer[6]) << 8) | static_cast<uint64_t>(buffer[7]);
-
-    value = static_cast<int64_t>(u);
+    statusbar::ieee::octlet_t q{};
+    span_load(q, buffer.subspan(0, 8));
+    value = static_cast<int64_t>(static_cast<uint64_t>(q));
     return success(size_t{8});
 }
 
@@ -75,13 +70,9 @@ auto load_float64(std::span<uint8_t const> buffer, double& value) noexcept -> St
     if (buffer.size() < 8) {
         return failure(OscError::buffer_underflow);
     }
-
-    uint64_t const bits = (static_cast<uint64_t>(buffer[0]) << 56) | (static_cast<uint64_t>(buffer[1]) << 48) |
-        (static_cast<uint64_t>(buffer[2]) << 40) | (static_cast<uint64_t>(buffer[3]) << 32) |
-        (static_cast<uint64_t>(buffer[4]) << 24) | (static_cast<uint64_t>(buffer[5]) << 16) |
-        (static_cast<uint64_t>(buffer[6]) << 8) | static_cast<uint64_t>(buffer[7]);
-
-    value = std::bit_cast<double>(bits);
+    statusbar::ieee::octlet_t q{};
+    span_load(q, buffer.subspan(0, 8));
+    value = std::bit_cast<double>(static_cast<uint64_t>(q));
     return success(size_t{8});
 }
 
@@ -319,8 +310,15 @@ auto osc_deserialize_message(std::span<uint8_t const> buffer, size_t& bytes_cons
     return success(std::move(msg));
 }
 
-auto osc_deserialize_bundle(std::span<uint8_t const> buffer, size_t& bytes_consumed) -> StatusValue<OscBundle>
+namespace {
+
+auto deserialize_bundle_at_depth(std::span<uint8_t const> buffer, size_t& bytes_consumed, size_t depth)
+    -> StatusValue<OscBundle>
 {
+    if (depth > OSC_MAX_BUNDLE_DEPTH) {
+        return failure(OscError::bundle_too_deep);
+    }
+
     bytes_consumed = 0;
     size_t pos = 0;
 
@@ -358,12 +356,18 @@ auto osc_deserialize_bundle(std::span<uint8_t const> buffer, size_t& bytes_consu
             return failure(OscError::buffer_underflow);
         }
 
+        // OSC data is 4-byte aligned: an element size that isn't a multiple of 4
+        // desyncs alignment for every following element.
+        if ((static_cast<size_t>(elem_size) % 4) != 0) {
+            return failure(OscError::invalid_alignment);
+        }
+
         auto const elem_data = buffer.subspan(pos, static_cast<size_t>(elem_size));
 
         // Determine if element is a message or nested bundle
         if (osc_is_bundle(elem_data)) {
             size_t elem_consumed{};
-            auto bundle_result = osc_deserialize_bundle(elem_data, elem_consumed);
+            auto bundle_result = deserialize_bundle_at_depth(elem_data, elem_consumed, depth + 1);
             if (!bundle_result) {
                 return failure(bundle_result.error());
             }
@@ -384,6 +388,13 @@ auto osc_deserialize_bundle(std::span<uint8_t const> buffer, size_t& bytes_consu
 
     bytes_consumed = pos;
     return success(std::move(bundle));
+}
+
+}  // namespace
+
+auto osc_deserialize_bundle(std::span<uint8_t const> buffer, size_t& bytes_consumed) -> StatusValue<OscBundle>
+{
+    return deserialize_bundle_at_depth(buffer, bytes_consumed, 0);
 }
 
 auto osc_parse(std::span<uint8_t const> buffer) -> StatusValue<std::variant<OscMessage, OscBundle>>

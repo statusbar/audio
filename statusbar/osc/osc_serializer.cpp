@@ -12,18 +12,16 @@
 
 namespace statusbar::osc {
 
+// OSC integers/floats are big-endian on the wire. ieee::quadlet_t / octlet_t
+// hold network byte order and convert on construction; span_store writes their
+// raw bytes. Same primitives the timetag path (and the rest of the codebase)
+// already use.
 auto store_int32(std::span<uint8_t> buffer, int32_t value) noexcept -> StatusValue<size_t>
 {
     if (buffer.size() < 4) {
         return failure(OscError::buffer_overflow);
     }
-
-    auto const u = static_cast<uint32_t>(value);
-    buffer[0] = static_cast<uint8_t>((u >> 24) & 0xFF);
-    buffer[1] = static_cast<uint8_t>((u >> 16) & 0xFF);
-    buffer[2] = static_cast<uint8_t>((u >> 8) & 0xFF);
-    buffer[3] = static_cast<uint8_t>(u & 0xFF);
-
+    span_store(buffer.subspan(0, 4), statusbar::ieee::quadlet_t{static_cast<uint32_t>(value)});
     return success(size_t{4});
 }
 
@@ -32,14 +30,7 @@ auto store_float32(std::span<uint8_t> buffer, float value) noexcept -> StatusVal
     if (buffer.size() < 4) {
         return failure(OscError::buffer_overflow);
     }
-
-    uint32_t const bits = std::bit_cast<uint32_t>(value);
-
-    buffer[0] = static_cast<uint8_t>((bits >> 24) & 0xFF);
-    buffer[1] = static_cast<uint8_t>((bits >> 16) & 0xFF);
-    buffer[2] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-    buffer[3] = static_cast<uint8_t>(bits & 0xFF);
-
+    span_store(buffer.subspan(0, 4), statusbar::ieee::quadlet_t{std::bit_cast<uint32_t>(value)});
     return success(size_t{4});
 }
 
@@ -48,17 +39,7 @@ auto store_int64(std::span<uint8_t> buffer, int64_t value) noexcept -> StatusVal
     if (buffer.size() < 8) {
         return failure(OscError::buffer_overflow);
     }
-
-    auto const u = static_cast<uint64_t>(value);
-    buffer[0] = static_cast<uint8_t>((u >> 56) & 0xFF);
-    buffer[1] = static_cast<uint8_t>((u >> 48) & 0xFF);
-    buffer[2] = static_cast<uint8_t>((u >> 40) & 0xFF);
-    buffer[3] = static_cast<uint8_t>((u >> 32) & 0xFF);
-    buffer[4] = static_cast<uint8_t>((u >> 24) & 0xFF);
-    buffer[5] = static_cast<uint8_t>((u >> 16) & 0xFF);
-    buffer[6] = static_cast<uint8_t>((u >> 8) & 0xFF);
-    buffer[7] = static_cast<uint8_t>(u & 0xFF);
-
+    span_store(buffer.subspan(0, 8), statusbar::ieee::octlet_t{static_cast<uint64_t>(value)});
     return success(size_t{8});
 }
 
@@ -67,18 +48,7 @@ auto store_float64(std::span<uint8_t> buffer, double value) noexcept -> StatusVa
     if (buffer.size() < 8) {
         return failure(OscError::buffer_overflow);
     }
-
-    uint64_t const bits = std::bit_cast<uint64_t>(value);
-
-    buffer[0] = static_cast<uint8_t>((bits >> 56) & 0xFF);
-    buffer[1] = static_cast<uint8_t>((bits >> 48) & 0xFF);
-    buffer[2] = static_cast<uint8_t>((bits >> 40) & 0xFF);
-    buffer[3] = static_cast<uint8_t>((bits >> 32) & 0xFF);
-    buffer[4] = static_cast<uint8_t>((bits >> 24) & 0xFF);
-    buffer[5] = static_cast<uint8_t>((bits >> 16) & 0xFF);
-    buffer[6] = static_cast<uint8_t>((bits >> 8) & 0xFF);
-    buffer[7] = static_cast<uint8_t>(bits & 0xFF);
-
+    span_store(buffer.subspan(0, 8), statusbar::ieee::octlet_t{std::bit_cast<uint64_t>(value)});
     return success(size_t{8});
 }
 
@@ -97,6 +67,12 @@ auto store_timetag(std::span<uint8_t> buffer, NtpTimetag value) noexcept -> Stat
 
 auto store_string(std::span<uint8_t> buffer, std::string_view str) noexcept -> StatusValue<size_t>
 {
+    // OSC strings are NUL-terminated, so an embedded NUL would reparse as a
+    // shorter string followed by misaligned garbage. Reject it up front.
+    if (str.find('\0') != std::string_view::npos) {
+        return failure(OscError::invalid_message);
+    }
+
     size_t const padded_size = osc_padded_string_size(str.size());
 
     if (buffer.size() < padded_size) {

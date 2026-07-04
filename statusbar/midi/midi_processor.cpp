@@ -39,7 +39,12 @@ auto process_midi_file(std::span<uint8_t const> input, MidiFileProcessor const& 
     // Second pass: process and write events
     MidiFileCallbacks cb;
 
-    cb.on_track_start = [&](int) { s = writer.begin_track(); };
+    cb.on_track_start = [&](int) {
+        if (is_failure(s)) {
+            return;  // don't overwrite an earlier track's failure
+        }
+        s = writer.begin_track();
+    };
 
     cb.on_message = [&](MidiTick time, MidiMessage const& msg) {
         if (is_failure(s)) {
@@ -57,7 +62,7 @@ auto process_midi_file(std::span<uint8_t const> input, MidiFileProcessor const& 
         if (is_failure(s)) {
             return;
         }
-        s = writer.write_sysex(time, sx.body);
+        s = writer.write_sysex(time, sx.body, sx.status);
     };
 
     cb.on_meta = [&](MidiTick time, MetaEvent const& ev) {

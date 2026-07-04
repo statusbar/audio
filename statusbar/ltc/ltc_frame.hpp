@@ -105,13 +105,12 @@ class LTCFrame
         set_bcd(56, tc.hours / 10, 2);
 
         // Binary group flag bit 2 (bit 58)
-        // For 25 fps and 50 fps, this is used differently
         set_bit(58, false);
 
-        // Polarity correction bit (bit 59)
-        // Set to ensure DC balance in the biphase signal
-        // Calculate parity of bits 0-58 and set bit 59 to make even parity
-        set_bit(59, calculate_parity());
+        // Biphase mark polarity correction bit — cleared here, then computed
+        // over the whole frame once every other bit is set (see below). Its
+        // position is rate-dependent per SMPTE 12M: bit 27 at 25 fps, else 59.
+        set_bit(59, false);
 
         // User bits 29-32 (bits 60-63)
         set_bits(60, (tc.user_bits >> 28) & 0xF, 4);
@@ -120,19 +119,28 @@ class LTCFrame
         // Bit 64-79 = 0xBFFC in our bit order (LSB first per byte)
         set_bits(64, 0xFC, 8);  // Bits 64-71: 0xFC
         set_bits(72, 0xBF, 8);  // Bits 72-79: 0xBF
+
+        // SMPTE 12M: set the polarity-correction bit so the entire 80-bit frame
+        // holds an even number of one-bits, keeping each frame's biphase
+        // waveform starting at a consistent polarity. Computed last, over all 80
+        // bits including the sync word. At 25 fps the bit is 27 (bit 59 is a
+        // binary group flag); at every other rate it is 59.
+        size_t const correction_bit = (tc.rate == FrameRate::Rate_25) ? 27 : 59;
+        if (count_ones() % 2 != 0) {
+            set_bit(correction_bit, true);
+        }
     }
 
-    /// Calculate parity of bits 0-58 for polarity correction
-    [[nodiscard]] constexpr auto calculate_parity() const noexcept -> bool
+    /// Count the one-bits across the whole 80-bit frame.
+    [[nodiscard]] constexpr auto count_ones() const noexcept -> size_t
     {
-        uint8_t parity = 0;
-        // Count 1s in bits 0-58
-        for (size_t i = 0; i < 59; ++i) {
+        size_t count = 0;
+        for (size_t i = 0; i < 80; ++i) {
             if (get_bit(i)) {
-                parity ^= 1;
+                ++count;
             }
         }
-        return parity != 0;  // Set bit 59 to make total even
+        return count;
     }
 
     /// Set a single bit at position

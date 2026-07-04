@@ -741,9 +741,11 @@ auto DeviceManager::find_device(std::string_view identifier, bool is_input) -> s
     return DeviceManagerLinux::find_device_impl(identifier, is_input);
 }
 
-// OutputStreamLinux Implementation
-
-struct OutputStreamLinux::Impl
+// Shared state and hardware-configuration helpers for the two Linux stream
+// directions. Output and Input differ only in the audio loop (generate vs
+// process) and the software-params (playback vs capture); the members below and
+// the hw-params negotiation are byte-for-byte identical, so they live here once.
+struct StreamImplLinuxBase
 {
     PcmHandleGuard pcm_handle;               // RAII-managed PCM handle
     AudioCallbackRT cb_rt;                   // RT-safe callback slot (coherent fn/ctx pair via triple buffer)
@@ -765,8 +767,16 @@ struct OutputStreamLinux::Impl
     std::vector<std::vector<float>> channel_buffers;
     std::vector<float*> channel_ptrs;
 
+    // Observability: xrun tally and the reason the stream last stopped/errored.
+    // Written by the audio thread, polled by the control thread.
+    std::atomic<uint64_t> xrun_count{0};
+    std::atomic<AudioError> last_error{AudioError::None};
+
     // Signal audio loop to stop (used from within audio_loop and helpers)
     void audio_loop_stop() { running.store(false, std::memory_order_release); }
+
+    // Record why the stream stopped/errored (audio thread → control thread).
+    void set_last_error(AudioError e) { last_error.store(e, std::memory_order_release); }
 
     // Check if audio loop should continue running
     bool audio_loop_is_running() const { return running.load(std::memory_order_acquire); }
@@ -780,12 +790,12 @@ struct OutputStreamLinux::Impl
         stream_time.publish(static_cast<double>(audio_loop_get_total_frames()) / sample_rate);
     }
 
-    ~Impl()
+    ~StreamImplLinuxBase()
     {
         // Signal audio thread to exit
         audio_loop_stop();
 
-        // Drop PCM first to unblock thread if it's waiting in snd_pcm_writei()
+        // Drop PCM first to unblock thread if it's waiting in snd_pcm_writei()/readi()
         pcm_handle.drop();
 
         if (audio_thread.joinable()) {
@@ -797,90 +807,7 @@ struct OutputStreamLinux::Impl
         // pcm_handle automatically closed by PcmHandleGuard destructor
     }
 
-    // Invoke user callback and interleave into output buffer
-    // Returns true to continue, false to stop
-    bool audio_loop_generate(uint32_t period_size, uint32_t channels, double sample_rate, ConversionBuffers& buffers)
-    {
-        // Load callback atomically from RT-safe storage
-        auto const cb = cb_rt.load();
-
-        if (cb.fn == nullptr) {
-            // No callback set - render silence instead of stopping
-            std::fill(buffers.interleaved_float.begin(), buffers.interleaved_float.end(), 0.0F);
-        } else {
-            // Call user callback with stream time at start of this period
-            double const stream_time_param = static_cast<double>(audio_loop_get_total_frames()) / sample_rate;
-
-            // Call user callback via RT-safe function pointer (noexcept, no std::function on RT thread)
-            int const result = cb.fn(cb.ctx, nullptr, channel_ptrs.data(), period_size, stream_time_param);
-
-            // CallbackHolder::thunk catches exceptions and returns -1
-            if (result < 0) {
-                // Error from callback - stop audio
-                audio_loop_stop();
-                return false;
-            }
-
-            // Convert non-interleaved to interleaved (always into interleaved_float first)
-            for (uint32_t frame = 0; frame < period_size; ++frame) {
-                for (uint32_t ch = 0; ch < channels; ++ch) {
-                    buffers.interleaved_float[(frame * channels) + ch] = channel_buffers[ch][frame];
-                }
-            }
-        }
-
-        return true;
-    }
-
-    // Handle ALSA write errors (suspend, underrun, other)
-    // Returns true if recovered and should retry, false if should stop
-    bool handle_write_error(int err)
-    {
-        if (err == -ESTRPIPE) {
-            return handle_pcm_suspend(pcm_handle.handle, running);
-        }
-        if (err == -EPIPE) {
-            return handle_pcm_xrun(pcm_handle.handle, running);
-        }
-        return handle_pcm_error(pcm_handle.handle, err, running);
-    }
-
-    // Write one full period to ALSA, handling errors and partial writes
-    // Returns true on success, false if audio should stop
-    bool audio_loop_write(snd_pcm_uframes_t period_size, void* write_buffer, size_t bytes_per_frame)
-    {
-        snd_pcm_sframes_t frames_written_total = 0;
-        uint8_t* const buffer_base = static_cast<uint8_t*>(write_buffer);
-
-        while (frames_written_total < static_cast<snd_pcm_sframes_t>(period_size) && audio_loop_is_running()) {
-            // Compute frame offset from base (makes frame vs byte semantics clear)
-            snd_pcm_uframes_t const frames_offset = static_cast<snd_pcm_uframes_t>(frames_written_total);
-            void* const write_ptr = buffer_base + (frames_offset * bytes_per_frame);
-            snd_pcm_uframes_t const remaining = period_size - frames_offset;
-
-            snd_pcm_sframes_t const frames_written = snd_pcm_writei(pcm_handle.handle, write_ptr, remaining);
-
-            if (frames_written < 0) {
-                if (!handle_write_error(static_cast<int>(frames_written))) {
-                    return false;  // Recovery failed - stop audio
-                }
-                continue;  // Retry after recovery
-            }
-
-            // Advance counters for partial writes
-            frames_written_total += frames_written;
-            total_frames.fetch_add(frames_written, std::memory_order_relaxed);
-        }
-
-        // If we were interrupted (running became false), signal stop
-        return frames_written_total == static_cast<snd_pcm_sframes_t>(period_size);
-    }
-
-    // Stream Initialization Helper Functions
-    // These functions take snd_pcm_t* as a parameter so ownership can remain
-    // with the caller's RAII guard until initialization is complete.
-
-    // Configure and apply ALSA hardware parameters
+    // Configure and apply ALSA hardware parameters (format/rate/channels/period).
     statusbar::Status configure_hw_params(snd_pcm_t* pcm, snd_pcm_hw_params_t* hw_params, unsigned int& periods)
     {
         int err = snd_pcm_hw_params_any(pcm, hw_params);
@@ -984,6 +911,108 @@ struct OutputStreamLinux::Impl
         }
     }
 
+    // Prepare PCM for playback/capture
+    statusbar::Status prepare_pcm(snd_pcm_t* pcm)
+    {
+        int const err = snd_pcm_prepare(pcm);
+        if (err < 0) {
+            return failure(AudioError::InitializationFailed);
+        }
+        return success();
+    }
+};
+
+// OutputStreamLinux Implementation
+
+struct OutputStreamLinux::Impl : StreamImplLinuxBase
+{
+    // Invoke user callback and interleave into output buffer
+    // Returns true to continue, false to stop
+    bool audio_loop_generate(uint32_t period_size, uint32_t channels, double sample_rate, ConversionBuffers& buffers)
+    {
+        // Load callback atomically from RT-safe storage
+        auto const cb = cb_rt.load();
+
+        if (cb.fn == nullptr) {
+            // No callback set - render silence instead of stopping
+            std::fill(buffers.interleaved_float.begin(), buffers.interleaved_float.end(), 0.0F);
+        } else {
+            // Call user callback with stream time at start of this period
+            double const stream_time_param = static_cast<double>(audio_loop_get_total_frames()) / sample_rate;
+
+            // Call user callback via RT-safe function pointer (noexcept, no std::function on RT thread)
+            int const result = cb.fn(cb.ctx, nullptr, channel_ptrs.data(), period_size, stream_time_param);
+
+            // CallbackHolder::thunk catches exceptions and returns -1
+            if (result < 0) {
+                // Error from callback - stop audio
+                set_last_error(AudioError::CallbackError);
+                audio_loop_stop();
+                return false;
+            }
+
+            // Convert non-interleaved to interleaved (always into interleaved_float first)
+            for (uint32_t frame = 0; frame < period_size; ++frame) {
+                for (uint32_t ch = 0; ch < channels; ++ch) {
+                    buffers.interleaved_float[(frame * channels) + ch] = channel_buffers[ch][frame];
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // Handle ALSA write errors (suspend, underrun, other)
+    // Returns true if recovered and should retry, false if should stop
+    bool handle_write_error(int err)
+    {
+        if (err == -ESTRPIPE) {
+            return handle_pcm_suspend(pcm_handle.handle, running);
+        }
+        if (err == -EPIPE) {
+            xrun_count.fetch_add(1, std::memory_order_relaxed);
+            set_last_error(AudioError::BufferUnderrun);
+            return handle_pcm_xrun(pcm_handle.handle, running);
+        }
+        return handle_pcm_error(pcm_handle.handle, err, running);
+    }
+
+    // Write one full period to ALSA, handling errors and partial writes
+    // Returns true on success, false if audio should stop
+    bool audio_loop_write(snd_pcm_uframes_t period_size, void* write_buffer, size_t bytes_per_frame)
+    {
+        snd_pcm_sframes_t frames_written_total = 0;
+        uint8_t* const buffer_base = static_cast<uint8_t*>(write_buffer);
+
+        while (frames_written_total < static_cast<snd_pcm_sframes_t>(period_size) && audio_loop_is_running()) {
+            // Compute frame offset from base (makes frame vs byte semantics clear)
+            snd_pcm_uframes_t const frames_offset = static_cast<snd_pcm_uframes_t>(frames_written_total);
+            void* const write_ptr = buffer_base + (frames_offset * bytes_per_frame);
+            snd_pcm_uframes_t const remaining = period_size - frames_offset;
+
+            snd_pcm_sframes_t const frames_written = snd_pcm_writei(pcm_handle.handle, write_ptr, remaining);
+
+            if (frames_written < 0) {
+                if (!handle_write_error(static_cast<int>(frames_written))) {
+                    return false;  // Recovery failed - stop audio
+                }
+                continue;  // Retry after recovery
+            }
+
+            // Advance counters for partial writes
+            frames_written_total += frames_written;
+            total_frames.fetch_add(frames_written, std::memory_order_relaxed);
+        }
+
+        // If we were interrupted (running became false), signal stop
+        return frames_written_total == static_cast<snd_pcm_sframes_t>(period_size);
+    }
+
+    // Stream Initialization Helper Functions
+    // These functions take snd_pcm_t* as a parameter so ownership can remain
+    // with the caller's RAII guard until initialization is complete.
+
+    // Configure and apply ALSA hardware parameters
     // Configure and apply ALSA software parameters for playback
     statusbar::Status configure_sw_params_playback(snd_pcm_t* pcm, unsigned int actual_periods) const
     {
@@ -1025,20 +1054,20 @@ struct OutputStreamLinux::Impl
         return success();
     }
 
-    // Prepare PCM for playback/capture
-    statusbar::Status prepare_pcm(snd_pcm_t* pcm)
-    {
-        int const err = snd_pcm_prepare(pcm);
-        if (err < 0) {
-            return failure(AudioError::InitializationFailed);
-        }
-        return success();
-    }
-
     // Set up callback and start audio thread
     // Output stream: 0 input channels, config.channels output channels
     void start_audio_thread(AudioCallbackFloat&& callback)
     {
+        // Join a thread left over from a prior self-stop (callback failure or
+        // denied RT priority): assigning over a joinable std::thread terminates.
+        if (audio_thread.joinable()) {
+            audio_thread.join();
+        }
+
+        // Fresh run: clear observability state carried from a previous run.
+        xrun_count.store(0, std::memory_order_relaxed);
+        last_error.store(AudioError::None, std::memory_order_release);
+
         holder = std::make_unique<CallbackHolder>(std::move(callback), cb_rt, 0, config.channels);
 
         running.store(true, std::memory_order_release);
@@ -1057,6 +1086,7 @@ struct OutputStreamLinux::Impl
         // Set thread priority based on configuration
         if (!set_thread_priority(config.thread_priority)) {
             // Failed to set required realtime priority - stop audio
+            set_last_error(AudioError::RealtimePriorityDenied);
             audio_loop_stop();
             return;
         }
@@ -1162,15 +1192,19 @@ auto OutputStreamLinux::start(AudioCallbackFloat&& callback) -> statusbar::Statu
 
 void OutputStreamLinux::stop()
 {
-    if (!impl_->running.exchange(false, std::memory_order_acq_rel)) {
-        return;  // Already stopped
+    // Drop pending audio only if we are the one stopping a running stream — this
+    // unblocks a thread waiting in snd_pcm_writei. A self-stopped stream (the
+    // callback returned failure, or RT priority was denied) has already exited
+    // the loop, so running is false here.
+    bool const was_running = impl_->running.exchange(false, std::memory_order_acq_rel);
+    if (was_running) {
+        impl_->pcm_handle.drop();
     }
 
-    // Drop pending audio to unblock any waiting writes
-    impl_->pcm_handle.drop();
-
-    // Join the audio thread to ensure it has completed
-    // snd_pcm_drop ensures the thread won't block indefinitely
+    // Always join a lingering thread, even on a self-stop where running was
+    // already false: leaving it joinable would terminate the process when the
+    // next start() assigns over impl_->audio_thread. Idempotent across repeat
+    // stop() calls (not joinable after the first).
     if (impl_->audio_thread.joinable()) {
         impl_->audio_thread.join();
     }
@@ -1225,6 +1259,16 @@ auto OutputStreamLinux::effective_buffer_frames() const noexcept -> uint32_t
     return static_cast<uint32_t>(impl_->negotiated_buffer_frames);
 }
 
+auto OutputStreamLinux::xrun_count() const noexcept -> uint64_t
+{
+    return impl_->xrun_count.load(std::memory_order_relaxed);
+}
+
+auto OutputStreamLinux::last_error() const noexcept -> AudioError
+{
+    return impl_->last_error.load(std::memory_order_acquire);
+}
+
 // OutputStream Factory
 
 auto OutputStream::create(std::string_view device_uid, AudioConfig const& config)
@@ -1248,60 +1292,8 @@ auto OutputStream::create(std::string_view device_uid, AudioConfig const& config
 
 // InputStreamLinux Implementation
 
-struct InputStreamLinux::Impl
+struct InputStreamLinux::Impl : StreamImplLinuxBase
 {
-    PcmHandleGuard pcm_handle;               // RAII-managed PCM handle
-    AudioCallbackRT cb_rt;                   // RT-safe callback slot (coherent fn/ctx pair via triple buffer)
-    std::unique_ptr<CallbackHolder> holder;  // Manages std::function lifetime
-    AudioConfig config;                      // Requested configuration (immutable after construction)
-    DeviceInfo device_info;
-    std::atomic<bool> running{false};
-    statusbar::itc::Published<double> stream_time{0.0};
-    std::atomic<uint64_t> total_frames{0};
-    std::thread audio_thread;
-
-    // ALSA-negotiated parameters (set during start(), may differ from requested config)
-    snd_pcm_format_t alsa_format{SND_PCM_FORMAT_FLOAT_LE};  // Actual ALSA format
-    uint32_t negotiated_sample_rate{48000};                 // Actual sample rate (may not be in enum)
-    snd_pcm_uframes_t negotiated_period_frames{512};        // Actual period size (callback buffer size)
-    snd_pcm_uframes_t negotiated_buffer_frames{1536};       // Actual buffer size (total HW buffer)
-
-    // Channel buffers for non-interleaved format
-    std::vector<std::vector<float>> channel_buffers;
-    std::vector<float*> channel_ptrs;
-
-    // Signal audio loop to stop (used from within audio_loop and helpers)
-    void audio_loop_stop() { running.store(false, std::memory_order_release); }
-
-    // Check if audio loop should continue running
-    bool audio_loop_is_running() const { return running.load(std::memory_order_acquire); }
-
-    // Get current total frames count (relaxed ordering for audio loop use)
-    uint64_t audio_loop_get_total_frames() const { return total_frames.load(std::memory_order_relaxed); }
-
-    // Update stream time from total_frames counter
-    void update_stream_time(double sample_rate)
-    {
-        stream_time.publish(static_cast<double>(audio_loop_get_total_frames()) / sample_rate);
-    }
-
-    ~Impl()
-    {
-        // Signal audio thread to exit
-        audio_loop_stop();
-
-        // Drop PCM first to unblock thread if it's waiting in snd_pcm_readi()
-        pcm_handle.drop();
-
-        if (audio_thread.joinable()) {
-            // Wait for audio thread to complete
-            audio_thread.join();
-        }
-
-        // holder.reset() clears cb_rt via CallbackHolder destructor
-        // pcm_handle automatically closed by PcmHandleGuard destructor
-    }
-
     // Handle ALSA read errors (suspend, overrun, other)
     // Returns true if recovered and should retry, false if should stop
     bool handle_read_error(int err)
@@ -1310,6 +1302,8 @@ struct InputStreamLinux::Impl
             return handle_pcm_suspend(pcm_handle.handle, running);
         }
         if (err == -EPIPE) {
+            xrun_count.fetch_add(1, std::memory_order_relaxed);
+            set_last_error(AudioError::BufferOverrun);
             return handle_pcm_xrun(pcm_handle.handle, running);
         }
         return handle_pcm_error(pcm_handle.handle, err, running);
@@ -1466,109 +1460,6 @@ struct InputStreamLinux::Impl
     // pcm_handle is only assigned on success via guard.release().
 
     // Configure and apply ALSA hardware parameters
-    statusbar::Status configure_hw_params(snd_pcm_t* pcm, snd_pcm_hw_params_t* hw_params, unsigned int& periods)
-    {
-        int err = snd_pcm_hw_params_any(pcm, hw_params);
-        if (err < 0) {
-            return failure(AudioError::InitializationFailed);
-        }
-
-        // Set access type (interleaved)
-        err = snd_pcm_hw_params_set_access(pcm, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
-        if (err < 0) {
-            return failure(AudioError::UnsupportedFormat);
-        }
-
-        // Try format fallback: FLOAT -> S32 -> S16
-        auto format_result = try_set_format(pcm, hw_params);
-        if (!format_result) {
-            return failure(AudioError::UnsupportedFormat);
-        }
-        alsa_format = *format_result;
-
-        // Set channels
-        err = snd_pcm_hw_params_set_channels(pcm, hw_params, config.channels);
-        if (err < 0) {
-            return failure(AudioError::UnsupportedFormat);
-        }
-
-        // Set sample rate
-        unsigned int rate = static_cast<unsigned int>(config.sample_rate);
-        err = snd_pcm_hw_params_set_rate_near(pcm, hw_params, &rate, nullptr);
-        if (err < 0) {
-            return failure(AudioError::UnsupportedFormat);
-        }
-
-        // Set period size (callback size)
-        snd_pcm_uframes_t period_size = config.buffer_frames;
-        err = snd_pcm_hw_params_set_period_size_near(pcm, hw_params, &period_size, nullptr);
-        if (err < 0) {
-            return failure(AudioError::InitializationFailed);
-        }
-
-        // Set number of periods in hardware buffer (2-4 periods recommended)
-        periods = 3;  // 3 periods for balanced latency/robustness
-        err = snd_pcm_hw_params_set_periods_near(pcm, hw_params, &periods, nullptr);
-        if (err < 0) {
-            // Not critical - ALSA will choose a reasonable default
-            periods = 3;
-        }
-
-        // Set buffer size to control total latency
-        snd_pcm_uframes_t buffer_size = period_size * periods;
-        err = snd_pcm_hw_params_set_buffer_size_near(pcm, hw_params, &buffer_size);
-        if (err < 0) {
-            // Not critical - ALSA will choose a reasonable default
-        }
-
-        // Apply hardware parameters
-        err = snd_pcm_hw_params(pcm, hw_params);
-        if (err < 0) {
-            return failure(AudioError::InitializationFailed);
-        }
-
-        return success();
-    }
-
-    // Query back actual negotiated parameters from ALSA
-    statusbar::Status query_negotiated_params(snd_pcm_t* pcm, unsigned int& actual_periods)
-    {
-        snd_pcm_hw_params_t* cur_params = nullptr;
-        snd_pcm_hw_params_alloca(&cur_params);
-
-        int const err = snd_pcm_hw_params_current(pcm, cur_params);
-        if (err < 0) {
-            return failure(AudioError::InitializationFailed);
-        }
-
-        unsigned int rate = 0;
-        snd_pcm_hw_params_get_rate(cur_params, &rate, nullptr);
-        negotiated_sample_rate = rate;
-
-        snd_pcm_uframes_t actual_period_size = 0;
-        snd_pcm_hw_params_get_period_size(cur_params, &actual_period_size, nullptr);
-        negotiated_period_frames = actual_period_size;
-
-        snd_pcm_hw_params_get_periods(cur_params, &actual_periods, nullptr);
-
-        snd_pcm_uframes_t actual_buffer_size = 0;
-        snd_pcm_hw_params_get_buffer_size(cur_params, &actual_buffer_size);
-        negotiated_buffer_frames = actual_buffer_size;
-
-        return success();
-    }
-
-    // Allocate channel buffers using negotiated period size
-    void allocate_channel_buffers()
-    {
-        channel_buffers.resize(config.channels);
-        channel_ptrs.resize(config.channels);
-        for (uint32_t i = 0; i < config.channels; ++i) {
-            channel_buffers[i].resize(negotiated_period_frames);
-            channel_ptrs[i] = channel_buffers[i].data();
-        }
-    }
-
     // Configure and apply ALSA software parameters for capture
     statusbar::Status configure_sw_params_capture(snd_pcm_t* pcm) const
     {
@@ -1591,20 +1482,20 @@ struct InputStreamLinux::Impl
         return success();
     }
 
-    // Prepare PCM for capture
-    statusbar::Status prepare_pcm(snd_pcm_t* pcm)
-    {
-        int const err = snd_pcm_prepare(pcm);
-        if (err < 0) {
-            return failure(AudioError::InitializationFailed);
-        }
-        return success();
-    }
-
     // Set up callback and start audio thread
     // Input stream: config.channels input channels, 0 output channels
     void start_audio_thread(AudioCallbackFloat&& callback)
     {
+        // Join a thread left over from a prior self-stop (callback failure or
+        // denied RT priority): assigning over a joinable std::thread terminates.
+        if (audio_thread.joinable()) {
+            audio_thread.join();
+        }
+
+        // Fresh run: clear observability state carried from a previous run.
+        xrun_count.store(0, std::memory_order_relaxed);
+        last_error.store(AudioError::None, std::memory_order_release);
+
         holder = std::make_unique<CallbackHolder>(std::move(callback), cb_rt, config.channels, 0);
 
         running.store(true, std::memory_order_release);
@@ -1623,6 +1514,7 @@ struct InputStreamLinux::Impl
         // Set thread priority based on configuration
         if (!set_thread_priority(config.thread_priority)) {
             // Failed to set required realtime priority - stop audio
+            set_last_error(AudioError::RealtimePriorityDenied);
             audio_loop_stop();
             return;
         }
@@ -1734,15 +1626,18 @@ auto InputStreamLinux::start(AudioCallbackFloat&& callback) -> statusbar::Status
 
 void InputStreamLinux::stop()
 {
-    if (!impl_->running.exchange(false, std::memory_order_acq_rel)) {
-        return;  // Already stopped
+    // Drop pending audio only when stopping a still-running stream (unblocks a
+    // thread waiting in snd_pcm_readi). A self-stopped stream has already left
+    // the loop, so running is false here.
+    bool const was_running = impl_->running.exchange(false, std::memory_order_acq_rel);
+    if (was_running) {
+        impl_->pcm_handle.drop();
     }
 
-    // Drop pending audio to unblock any waiting reads
-    impl_->pcm_handle.drop();
-
-    // Join the audio thread to ensure it has completed
-    // snd_pcm_drop ensures the thread won't block indefinitely
+    // Always join a lingering thread, even on a self-stop where running was
+    // already false: leaving it joinable would terminate the process when the
+    // next start() assigns over impl_->audio_thread. Idempotent across repeat
+    // stop() calls (not joinable after the first).
     if (impl_->audio_thread.joinable()) {
         impl_->audio_thread.join();
     }
@@ -1795,6 +1690,16 @@ auto InputStreamLinux::effective_buffer_frames() const noexcept -> uint32_t
         return std::numeric_limits<uint32_t>::max();
     }
     return static_cast<uint32_t>(impl_->negotiated_buffer_frames);
+}
+
+auto InputStreamLinux::xrun_count() const noexcept -> uint64_t
+{
+    return impl_->xrun_count.load(std::memory_order_relaxed);
+}
+
+auto InputStreamLinux::last_error() const noexcept -> AudioError
+{
+    return impl_->last_error.load(std::memory_order_acquire);
 }
 
 // InputStream Factory

@@ -132,9 +132,10 @@ int main()
     eq.connect(eq_pipe);
     meter.connect_telemetry(meter_pipe);
 
-    // Seed initial state so the first leg isn't silent.
+    // Seed initial state so the first leg isn't silent. Default-constructed
+    // coeffs are all-zero (silence): use unity gain and an identity biquad.
     gain.prime_segment(hold_segment(GainAmplitudeCoeffs<float>{1.0F}));
-    eq.prime_segment(hold_segment(BiquadComplexCoeffs<float>{}));
+    eq.prime_segment(hold_segment(BiquadComplexCoeffs<float>::identity()));
 
     // Run one leg of audio: gain → eq → meter.
     std::array<float, Consts::samples_per_leg> in{}, mid1{}, mid2{}, out{};

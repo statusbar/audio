@@ -92,6 +92,12 @@ auto MockOutputStream::start(AudioCallbackFloat&& callback) -> Status
         return failure(mock_config_.error_on_start);
     }
 
+    // Join a thread left over from a prior self-stop (max_callbacks reached);
+    // assigning over a joinable std::thread would terminate the process.
+    if (simulation_thread_.joinable()) {
+        simulation_thread_.join();
+    }
+
     callback_ = std::move(callback);
     running_ = true;
     callback_count_ = 0;
@@ -125,10 +131,9 @@ auto MockOutputStream::start(AudioCallbackFloat&& callback) -> Status
 
 void MockOutputStream::stop()
 {
-    if (!running_) {
-        return;  // Already stopped - idempotent
-    }
-
+    // Always join a lingering thread, even after a self-stop (max_callbacks)
+    // where running_ is already false — otherwise the next start() assigns over
+    // a joinable std::thread and terminates. Idempotent across repeat calls.
     running_ = false;
 
     if (simulation_thread_.joinable()) {
@@ -289,6 +294,12 @@ auto MockInputStream::start(AudioCallbackFloat&& callback) -> Status
         return failure(mock_config_.error_on_start);
     }
 
+    // Join a thread left over from a prior self-stop (max_callbacks reached);
+    // assigning over a joinable std::thread would terminate the process.
+    if (simulation_thread_.joinable()) {
+        simulation_thread_.join();
+    }
+
     callback_ = std::move(callback);
     running_ = true;
     callback_count_ = 0;
@@ -313,10 +324,9 @@ auto MockInputStream::start(AudioCallbackFloat&& callback) -> Status
 
 void MockInputStream::stop()
 {
-    if (!running_) {
-        return;  // Already stopped - idempotent
-    }
-
+    // Always join a lingering thread, even after a self-stop (max_callbacks)
+    // where running_ is already false — otherwise the next start() assigns over
+    // a joinable std::thread and terminates. Idempotent across repeat calls.
     running_ = false;
 
     if (simulation_thread_.joinable()) {

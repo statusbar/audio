@@ -23,23 +23,13 @@ namespace statusbar::dsp {
 /// This template specialization provides optimized SIMD operations
 /// using ARM NEON intrinsics for 4-element float vectors.
 template <>
-class alignas(simd_alignment<float, 4>()) SIMDVec<float, 4>
+class alignas(simd_alignment<float, 4>()) SIMDVec<float, 4> : public SIMDVecContainer<float, 4>
 {
   public:
     using simd_type = SIMDVec<float, 4>;
     using internal_type = float32x4_t;
-    using value_type = float;
-
-    using pointer = value_type*;
-    using const_pointer = value_type const*;
-    using reference = value_type&;
-    using const_reference = value_type const&;
-    using iterator = pointer;
-    using const_iterator = const_pointer;
-    using size_type = std::size_t;
-    using difference_type = std::ptrdiff_t;
-
-    static constexpr size_type vector_size = 4;
+    // value_type / size_type / vector_size and the container/iterator interface
+    // come from SIMDVecContainer.
 
     union
     {
@@ -89,15 +79,6 @@ class alignas(simd_alignment<float, 4>()) SIMDVec<float, 4>
     /// Destructor
     ~SIMDVec() = default;
 
-    /// Get the vector size
-    [[nodiscard]] static constexpr auto size() noexcept -> size_type { return vector_size; }
-
-    /// Get the vector maximum size
-    [[nodiscard]] static constexpr auto max_size() noexcept -> size_type { return vector_size; }
-
-    /// Vector is never empty
-    [[nodiscard]] static constexpr auto empty() noexcept -> bool { return false; }
-
     /// Create a zero-initialized vector
     [[nodiscard]] static auto zero() noexcept -> simd_type
     {
@@ -132,66 +113,6 @@ class alignas(simd_alignment<float, 4>()) SIMDVec<float, 4>
         vec_ = other.vec_;
         other.vec_ = temp;
     }
-
-    /// Get pointer to underlying array
-    [[nodiscard]] constexpr auto data() noexcept -> pointer { return item_; }
-
-    /// Get const pointer to underlying array
-    [[nodiscard]] constexpr auto data() const noexcept -> const_pointer { return item_; }
-
-    /// Array subscript operator (const)
-    [[nodiscard]] constexpr auto operator[](size_type index) const noexcept -> const_reference { return item_[index]; }
-
-    /// Array subscript operator (non-const)
-    [[nodiscard]] constexpr auto operator[](size_type index) noexcept -> reference { return item_[index]; }
-
-    /// Bounds-checked element access (const)
-    [[nodiscard]] auto at(size_type index) const -> const_reference
-    {
-        if (index >= vector_size) {
-            detail::out_of_range("SIMDVec index out of range");
-        }
-        return item_[index];
-    }
-
-    /// Bounds-checked element access (non-const)
-    [[nodiscard]] auto at(size_type index) -> reference
-    {
-        if (index >= vector_size) {
-            detail::out_of_range("SIMDVec index out of range");
-        }
-        return item_[index];
-    }
-
-    /// Get the first element
-    [[nodiscard]] constexpr auto front() noexcept -> reference { return item_[0]; }
-
-    /// Get the first element (const)
-    [[nodiscard]] constexpr auto front() const noexcept -> const_reference { return item_[0]; }
-
-    /// Get the last element
-    [[nodiscard]] constexpr auto back() noexcept -> reference { return item_[vector_size - 1]; }
-
-    /// Get the last element (const)
-    [[nodiscard]] constexpr auto back() const noexcept -> const_reference { return item_[vector_size - 1]; }
-
-    /// Iterator to beginning
-    [[nodiscard]] constexpr auto begin() noexcept -> iterator { return item_; }
-
-    /// Const iterator to beginning
-    [[nodiscard]] constexpr auto begin() const noexcept -> const_iterator { return item_; }
-
-    /// Const iterator to beginning
-    [[nodiscard]] constexpr auto cbegin() const noexcept -> const_iterator { return item_; }
-
-    /// Iterator to end
-    [[nodiscard]] constexpr auto end() noexcept -> iterator { return item_ + vector_size; }
-
-    /// Const iterator to end
-    [[nodiscard]] constexpr auto end() const noexcept -> const_iterator { return item_ + vector_size; }
-
-    /// Const iterator to end
-    [[nodiscard]] constexpr auto cend() const noexcept -> const_iterator { return item_ + vector_size; }
 
     // Horizontal Reduction Operations
 

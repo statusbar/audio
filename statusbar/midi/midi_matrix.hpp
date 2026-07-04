@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 
 namespace statusbar::midi {
 
@@ -101,6 +102,12 @@ class MidiMatrix
   private:
     constexpr auto inc_note_count(uint8_t channel, uint8_t note) -> void
     {
+        // Saturate the per-note count so a flood of stacked note-ons on one note
+        // can't wrap the uint8_t back to 0 and leave it disagreeing with the
+        // int channel/total tallies forever.
+        if (note_on_count_[channel][note] == std::numeric_limits<uint8_t>::max()) {
+            return;
+        }
         ++note_on_count_[channel][note];
         ++channel_count_[channel];
         ++total_count_;

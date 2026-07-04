@@ -261,6 +261,15 @@ TEST(midi_vlq, write_max)
     EXPECT_EQ(buf.get_span()[3], uint8_t{0x7F});
 }
 
+TEST(midi_vlq, write_rejects_over_28_bits)
+{
+    std::array<uint8_t, 64> storage{};
+    MutableBuffer buf(storage);
+    EXPECT_TRUE(is_failure(detail::write_vlq(buf, 0x10000000u)));
+    EXPECT_TRUE(is_failure(detail::write_vlq(buf, 0xFFFFFFFFu)));
+    EXPECT_EQ(buf.size(), size_t{0});
+}
+
 TEST(midi_vlq, roundtrip)
 {
     uint32_t const values[] = {0, 1, 127, 128, 255, 16383, 16384, 0x0FFFFFFFu};
@@ -366,6 +375,27 @@ TEST(midi_parser, running_status)
     EXPECT_EQ(last.status(), uint8_t{0x91});
     EXPECT_EQ(last.note(), uint8_t{64});
     EXPECT_EQ(last.velocity(), uint8_t{80});
+}
+
+TEST(midi_parser, system_common_cancels_running_status)
+{
+    int count = 0;
+    MidiMessage last;
+    MidiParser<64> parser([&](MidiMessage const& msg) {
+        last = msg;
+        ++count;
+    });
+
+    // Song Select (0xF3) is a one-data-byte system-common message.
+    parser.parse(0xF3);
+    parser.parse(0x10);
+    EXPECT_EQ(count, 1);
+    EXPECT_EQ(last.status(), uint8_t{0xF3});
+
+    // A following bare data byte must NOT reuse 0xF3 as running status — system
+    // common cancels running status, so no message is emitted.
+    parser.parse(0x20);
+    EXPECT_EQ(count, 1);
 }
 
 TEST(midi_parser, program_change_two_byte)
@@ -841,6 +871,36 @@ TEST(midi_file_write, single_track_note)
     EXPECT_TRUE(is_success(result));
     EXPECT_EQ(msg_count, 2);
     EXPECT_EQ(last_tick, MidiTick{480});
+}
+
+TEST(midi_file_write, sysex_f7_escape_roundtrips)
+{
+    std::array<uint8_t, 512> storage{};
+    MutableBuffer buf(storage);
+    MidiFileWriter writer(buf);
+
+    std::array<uint8_t, 3> const normal_body{0x7E, 0x00, 0xF7};
+    std::array<uint8_t, 2> const escape_body{0x11, 0x22};
+
+    EXPECT_TRUE(is_success(writer.write_header(0, 1, 480)));
+    EXPECT_TRUE(is_success(writer.begin_track()));
+    EXPECT_TRUE(is_success(writer.write_sysex(0, normal_body)));                  // 0xF0 default
+    EXPECT_TRUE(is_success(writer.write_sysex(10, escape_body, 0xF7)));           // F7 escape
+    EXPECT_TRUE(is_success(writer.write_end_of_track(10)));
+    EXPECT_TRUE(is_success(writer.end_track()));
+
+    // An invalid leading status must be rejected.
+    EXPECT_TRUE(is_failure(writer.write_sysex(0, escape_body, 0x90)));
+
+    std::vector<uint8_t> statuses;
+    MidiFileCallbacks cb;
+    cb.on_sysex = [&](MidiTick, SysexEvent const& sx) { statuses.push_back(sx.status); };
+    auto const result = read_midi_file(buf.get_span(), cb);
+    EXPECT_TRUE(is_success(result));
+    // Both events round-trip with their original status byte, not rewritten to F0.
+    EXPECT_EQ(statuses.size(), size_t{2});
+    EXPECT_EQ(statuses[0], uint8_t{0xF0});
+    EXPECT_EQ(statuses[1], uint8_t{0xF7});
 }
 
 TEST(midi_file_write, running_status_optimization)
@@ -1405,6 +1465,27 @@ TEST(midi_file_safety, ntrks_zero_is_valid_header)
     auto const s = read_midi_file(std::span<uint8_t const>(data), cb);
     EXPECT_TRUE(is_success(s));
     EXPECT_EQ(ntrks_seen, 0);
+}
+
+TEST(midi_matrix, note_count_saturates_without_desync)
+{
+    // Stacking more than 255 note-ons on one note must not wrap the uint8_t
+    // per-note counter and leave it disagreeing with the channel/total tallies.
+    MidiMatrix matrix;
+    for (int i = 0; i < 300; ++i) {
+        matrix.process(MidiMessage::note_on(0, 60, 100));
+    }
+    EXPECT_EQ(matrix.note_count(0, 60), uint8_t{255});
+    EXPECT_EQ(matrix.channel_count(0), 255);
+    EXPECT_EQ(matrix.total_count(), 255);
+
+    // Every note-off decrements in lockstep down to a clean zero.
+    for (int i = 0; i < 255; ++i) {
+        matrix.process(MidiMessage::note_off(0, 60, 0));
+    }
+    EXPECT_EQ(matrix.note_count(0, 60), uint8_t{0});
+    EXPECT_EQ(matrix.channel_count(0), 0);
+    EXPECT_EQ(matrix.total_count(), 0);
 }
 
 TEST_MAIN(statusbar_midi, midi_test)

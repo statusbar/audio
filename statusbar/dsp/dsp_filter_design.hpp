@@ -56,12 +56,25 @@ constexpr auto clamp_q(double q) noexcept -> double
     return q < min_q ? min_q : q;
 }
 
+/// Bilinear-transform prewarp: k = tan(pi * f/fs), with the normalized
+/// frequency f/fs clamped to the open interval (0, 0.5). Without the clamp,
+/// f at/above Nyquist drives tan() to infinity and f = 0 puts double poles on
+/// the unit circle — both yield inf/NaN coefficients.
+inline auto prewarp_k(FilterParams<> const& params) noexcept -> double
+{
+    constexpr double min_f_norm = 1e-6;
+    constexpr double max_f_norm = 0.5 - 1e-6;
+    double f_norm = params.frequency * params.sample_rate_recip;
+    f_norm = f_norm < min_f_norm ? min_f_norm : (f_norm > max_f_norm ? max_f_norm : f_norm);
+    return std::tan(constants::pi() * f_norm);
+}
+
 /// 2nd-order Butterworth lowpass.
 /// Passes frequencies below cutoff, -3 dB at cutoff, 12 dB/octave rolloff.
 inline auto design_lowpass(FilterParams<> const& params) -> BiquadCoeffsF64
 {
     double const q = clamp_q(params.q);
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const norm = 1.0 / (1.0 + (k / q) + (k * k));
     double const a0 = (k * k) * norm;
     return {.a0 = a0, .a1 = 2.0 * a0, .a2 = a0, .b1 = 2.0 * ((k * k) - 1.0) * norm, .b2 = (1.0 - (k / q) + (k * k)) * norm};
@@ -72,7 +85,7 @@ inline auto design_lowpass(FilterParams<> const& params) -> BiquadCoeffsF64
 inline auto design_highpass(FilterParams<> const& params) -> BiquadCoeffsF64
 {
     double const q = clamp_q(params.q);
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const norm = 1.0 / (1.0 + (k / q) + (k * k));
     double const a0 = norm;
     return {.a0 = a0, .a1 = -2.0 * a0, .a2 = a0, .b1 = 2.0 * ((k * k) - 1.0) * norm, .b2 = (1.0 - (k / q) + (k * k)) * norm};
@@ -82,7 +95,7 @@ inline auto design_highpass(FilterParams<> const& params) -> BiquadCoeffsF64
 inline auto design_bandpass(FilterParams<> const& params) -> BiquadCoeffsF64
 {
     double const q = clamp_q(params.q);
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const norm = 1.0 / (1.0 + (k / q) + (k * k));
     double const a0 = (k / q) * norm;
     return {.a0 = a0, .a1 = 0.0, .a2 = -a0, .b1 = 2.0 * ((k * k) - 1.0) * norm, .b2 = (1.0 - (k / q) + (k * k)) * norm};
@@ -92,7 +105,7 @@ inline auto design_bandpass(FilterParams<> const& params) -> BiquadCoeffsF64
 inline auto design_notch(FilterParams<> const& params) -> BiquadCoeffsF64
 {
     double const q = clamp_q(params.q);
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const norm = 1.0 / (1.0 + (k / q) + (k * k));
     double const a0 = (1.0 + (k * k)) * norm;
     double const a1 = 2.0 * ((k * k) - 1.0) * norm;
@@ -104,7 +117,7 @@ inline auto design_notch(FilterParams<> const& params) -> BiquadCoeffsF64
 inline auto design_peak(FilterParams<> const& params) -> BiquadCoeffsF64
 {
     double const q = clamp_q(params.q);
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const v = std::pow(10.0, std::abs(params.gain_db) / 20.0);
 
     if (params.gain_db >= 0) {
@@ -131,7 +144,7 @@ inline auto design_peak(FilterParams<> const& params) -> BiquadCoeffsF64
 /// @note Q parameter is ignored (fixed sqrt(2) slope).
 inline auto design_lowshelf(FilterParams<> const& params) -> BiquadCoeffsF64
 {
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const v = std::pow(10.0, std::abs(params.gain_db) / 20.0);
     auto const sqrt2 = constants::sqrt_2<double>();
 
@@ -157,7 +170,7 @@ inline auto design_lowshelf(FilterParams<> const& params) -> BiquadCoeffsF64
 /// @note Q parameter is ignored (fixed sqrt(2) slope).
 inline auto design_highshelf(FilterParams<> const& params) -> BiquadCoeffsF64
 {
-    double const k = std::tan(constants::pi() * params.frequency * params.sample_rate_recip);
+    double const k = prewarp_k(params);
     double const v = std::pow(10.0, std::abs(params.gain_db) / 20.0);
     auto const sqrt2 = constants::sqrt_2<double>();
 

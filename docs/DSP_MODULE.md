@@ -43,7 +43,7 @@ loop.
 
 ## Key types
 
-- `BiQuad<T>` — transposed direct-form-I biquad. Nested `Coeffs` exposes `set()` plus `calculate_{lowpass,highpass,bandpass,notch,peak,lowshelf,highshelf}(FilterParams<>)` and `process_z_domain(z1)` for offline frequency-response queries. `State` holds the two delay taps.
+- `BiQuad<T>` — transposed direct form II biquad. Nested `Coeffs` exposes `set()` plus `calculate_{lowpass,highpass,bandpass,notch,peak,lowshelf,highshelf}(FilterParams<>)` and `process_z_domain(z1)` for offline frequency-response queries. `State` holds the two delay taps.
 - `ComplexBiQuad<T>` — same surface as `BiQuad` but factored into two complex first-order sections; numerically more stable at extreme `sample_rate / cutoff` ratios. Coefficients populated via `set_from_biquad_coeffs(a0, a1, a2, b1, b2)` or the same `calculate_*` family.
 - `ComplexFirstOrderCoeffs<T>` / `ComplexFirstOrderState<T>` — the two halves of a single complex first-order section (real/imag of `a0`, `a1`, `b1`).
 - `Gain<T>` — single-pole smoothed scalar gain. `Coeffs::set_amplitude` / `set_amplitude_db` / `set_time_constant(sample_rate, time_in_seconds)` / `set_bypass` / `set_mute`. `State::snap_to_target(coeffs)` jumps without ramping.

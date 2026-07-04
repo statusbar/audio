@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 // SMPTE LTC (Linear Timecode) Generator Module
-// Generates SMPTE 12M compliant LTC audio signals at 30fps non-drop frame
+// Generates SMPTE 12M compliant LTC audio signals across all supported frame
+// rates (23.976 / 24 / 25 / 29.97 DF+NDF / 30 DF+NDF)
 
 #include "statusbar/ltc/ltc_frame.hpp"
 #include "statusbar/ltc/ltc_generator.hpp"
