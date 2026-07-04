@@ -35,6 +35,12 @@ namespace statusbar::midi::detail {
 /// Write a variable-length quantity into a MutableBuffer.
 [[nodiscard]] inline auto write_vlq(MutableBuffer& buf, uint32_t value) -> Status
 {
+    // SMF VLQs are capped at four 7-bit groups; a larger value would overflow
+    // the encode buffer below.
+    if (value > 0x0FFFFFFFu) {
+        return failure(MidiError::invalid_vlq);
+    }
+
     uint8_t bytes[4];
     int count = 0;
 

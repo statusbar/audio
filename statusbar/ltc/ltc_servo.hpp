@@ -64,7 +64,7 @@ class ServoGenerator
     {
         accumulated_error_ = 0.0;
         phase_adjustment_ = 1.0;
-        buffer_position_ = 0;
+        read_position_ = 0.0;
     }
 
   private:
@@ -72,7 +72,7 @@ class ServoGenerator
     FrameRate frame_rate_;                  // SMPTE frame rate
     Timecode current_timecode_;             // Current timecode
     std::vector<float> sample_buffer_;      // Sample buffer for current frame
-    size_t buffer_position_{0};             // Current position in buffer
+    double read_position_{0.0};             // Fractional read position, persisted across get_samples() calls
     double accumulated_error_{0.0};         // Accumulated timing error
     double phase_adjustment_{1.0};          // Current phase adjustment factor
     double last_reference_timestamp_{0.0};  // Last reference timestamp

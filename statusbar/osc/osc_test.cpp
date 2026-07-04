@@ -1090,6 +1090,7 @@ TEST(osc_error, all_errors_have_messages)
     check(OscError::string_not_terminated);
     check(OscError::type_mismatch);
     check(OscError::invalid_message);
+    check(OscError::bundle_too_deep);
 }
 
 TEST(osc_error, category_name)
@@ -1312,6 +1313,31 @@ TEST(osc_decoder_safety, bundle_element_size_exceeds_remaining)
     EXPECT_FALSE(result.has_value());
 }
 
+TEST(osc_decoder_safety, bundle_element_size_not_multiple_of_4_rejected)
+{
+    // elem_size = 6 is within bounds but not 4-byte aligned; must be rejected
+    // with invalid_alignment (all OSC data is 4-byte aligned).
+    std::array<uint8_t, 26> buf{
+        '#',  'b',  'u',  'n',  'd', 'l', 'e', '\0', 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, 0x00, 0x06,  // elem_size = 6
+        0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+    };
+    auto const result = deserialize_bundle(buf);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), make_error_code(OscError::invalid_alignment));
+}
+
+TEST(osc_serialize, string_with_embedded_nul_rejected)
+{
+    // An address/string containing an embedded NUL would reparse as a shorter
+    // string plus misaligned residue; serialization must reject it.
+    OscMessage msg{"/ok"};
+    msg.append_string(std::string_view("ab\0cd", 5));
+    std::array<uint8_t, 128> buf{};
+    auto const r = osc_serialize(std::span<uint8_t>(buf), msg);
+    EXPECT_FALSE(r.has_value());
+    EXPECT_EQ(r.error(), make_error_code(OscError::invalid_message));
+}
+
 TEST(osc_decoder_safety, bundle_element_size_zero_rejected)
 {
     std::array<uint8_t, 24> buf{
@@ -1337,6 +1363,26 @@ TEST(osc_decoder_safety, bundle_element_neither_bundle_nor_message)
     };
     auto const result = deserialize_bundle(buf);
     EXPECT_FALSE(result.has_value());
+}
+
+TEST(osc_decoder_safety, deeply_nested_bundles_rejected)
+{
+    // Build depth (OSC_MAX_BUNDLE_DEPTH + 5) bundles nested one inside the
+    // next; the parser must reject rather than recurse into a stack overflow.
+    std::vector<uint8_t> inner{'#', 'b', 'u', 'n', 'd', 'l', 'e', '\0', 0, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = 0; i < OSC_MAX_BUNDLE_DEPTH + 5; ++i) {
+        auto const child_size = static_cast<uint32_t>(inner.size());
+        std::vector<uint8_t> outer{'#', 'b', 'u', 'n', 'd', 'l', 'e', '\0', 0, 0, 0, 0, 0, 0, 0, 0};
+        outer.push_back(static_cast<uint8_t>((child_size >> 24) & 0xFF));
+        outer.push_back(static_cast<uint8_t>((child_size >> 16) & 0xFF));
+        outer.push_back(static_cast<uint8_t>((child_size >> 8) & 0xFF));
+        outer.push_back(static_cast<uint8_t>(child_size & 0xFF));
+        outer.insert(outer.end(), inner.begin(), inner.end());
+        inner = std::move(outer);
+    }
+    auto const result = deserialize_bundle(inner);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), make_error_code(OscError::bundle_too_deep));
 }
 
 TEST(osc_decoder_safety, wrong_bundle_magic)

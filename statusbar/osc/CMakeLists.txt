@@ -17,3 +17,7 @@ statusbar_add_module(
   statusbar::status
   TESTS
   osc_test.cpp)
+
+# Fuzz harness for the untrusted UDP wire-format decoder (no-op unless
+# ENABLE_FUZZING).
+add_audio_fuzzer(${CMAKE_CURRENT_LIST_DIR}/osc_deserializer_fuzzer.cpp)

@@ -41,7 +41,7 @@ auto ServoGenerator::set_timecode(Timecode const& tc, double reference_timestamp
     // Generate samples for this frame
     sample_buffer_.clear();
     generator_.generate_frame(tc, sample_buffer_);
-    buffer_position_ = 0;
+    read_position_ = 0.0;
 }
 
 auto ServoGenerator::update_timing(double actual_timestamp, double expected_timestamp) -> void
@@ -49,43 +49,46 @@ auto ServoGenerator::update_timing(double actual_timestamp, double expected_time
     // Calculate phase error (in seconds)
     double const error = actual_timestamp - expected_timestamp;
 
-    // Accumulate error for integral control
-    accumulated_error_ += error;
-
-    // Simple proportional-integral control
-    // Adjust sample generation rate to compensate for drift
+    // Proportional-integral control: adjust the sample read rate to compensate
+    // for drift.
     constexpr double kp = 0.01;   // Proportional gain
     constexpr double ki = 0.001;  // Integral gain
 
-    phase_adjustment_ = 1.0 + ((kp * error) + (ki * accumulated_error_));
+    double const proposed_accum = accumulated_error_ + error;
+    double const unclamped = 1.0 + ((kp * error) + (ki * proposed_accum));
 
-    // Clamp adjustment to reasonable range (+-0.1%)
-    phase_adjustment_ = std::clamp(phase_adjustment_, 0.999, 1.001);
+    // Clamp adjustment to a reasonable range (+-0.1%).
+    phase_adjustment_ = std::clamp(unclamped, 0.999, 1.001);
+
+    // Anti-windup (conditional integration): only commit the integral step when
+    // the output isn't saturated, so the integrator can't wind up and overshoot
+    // once the error reverses.
+    if (phase_adjustment_ == unclamped) {
+        accumulated_error_ = proposed_accum;
+    }
 }
 
 auto ServoGenerator::get_samples(size_t count, std::vector<float>& output) -> void
 {
     output.clear();
 
-    // Apply phase adjustment by slightly varying sample output rate
-    double adjusted_position = static_cast<double>(buffer_position_);
-
     for (size_t i = 0; i < count; ++i) {
-        // Check if we need to generate next frame
-        if (buffer_position_ >= sample_buffer_.size()) {
-            // Move to next frame
+        // Cross into the next frame once the current one is consumed, carrying
+        // the fractional overshoot rather than snapping back to 0 — otherwise
+        // ~0.5 sample of phase is dropped at every frame boundary.
+        while (read_position_ >= static_cast<double>(sample_buffer_.size())) {
+            double const overshoot = read_position_ - static_cast<double>(sample_buffer_.size());
             current_timecode_.increment_frame();
             sample_buffer_.clear();
             generator_.generate_frame(current_timecode_, sample_buffer_);
-            buffer_position_ = 0;
-            adjusted_position = 0.0;
+            read_position_ = overshoot;
         }
 
-        output.push_back(interpolate_sample(sample_buffer_, adjusted_position));
+        output.push_back(interpolate_sample(sample_buffer_, read_position_));
 
-        // Advance position with servo adjustment
-        adjusted_position += phase_adjustment_;
-        buffer_position_ = static_cast<size_t>(adjusted_position);
+        // Advance the fractional read position by the servo rate; it persists
+        // across get_samples() calls so sub-sample corrections aren't quantized.
+        read_position_ += phase_adjustment_;
     }
 }
 

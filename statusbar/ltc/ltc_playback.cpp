@@ -119,9 +119,17 @@ auto process_servo_callback(
         state.servo->update_timing(current_epoch, expected_time);
         state.last_update_epoch = current_epoch;
 
-        // Resync timecode from realtime clock (with offset if specified)
-        auto rt_tc = Timecode::from_realtime(state.frame_rate, local_time, millis, state.time_offset_seconds);
-        state.servo->set_timecode(rt_tc, current_epoch);
+        // Resync from the realtime clock only when the timecode has jumped by a
+        // whole frame or more. Small drift is absorbed smoothly by the servo's
+        // rate adjustment above; a hard set_timecode mid-frame would truncate the
+        // current frame's waveform, so reserve it for a genuine discontinuity.
+        auto const rt_tc = Timecode::from_realtime(state.frame_rate, local_time, millis, state.time_offset_seconds);
+        auto const& cur_tc = state.servo->current_timecode();
+        int64_t const frame_diff =
+            static_cast<int64_t>(rt_tc.to_frame_count()) - static_cast<int64_t>(cur_tc.to_frame_count());
+        if ((frame_diff < 0 ? -frame_diff : frame_diff) >= 2) {
+            state.servo->set_timecode(rt_tc, current_epoch);
+        }
     }
 
     return success();

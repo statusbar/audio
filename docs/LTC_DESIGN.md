@@ -91,9 +91,10 @@ separate boolean. Frame counting helpers — `is_valid()`, `increment_frame()`,
 
 #### 4. Clock Servo (`ltc_servo.hpp`)
 - Tracks phase difference between audio clock and SMPTE reference
-- Implements simple proportional control or PLL
-- Adjusts sample generation rate to maintain sync
-- Handles sample insertion/deletion for drift correction
+- Implements a proportional-integral (PI) controller
+- Adjusts the read rate within a ±0.1% clamp to maintain sync
+- Does **not** insert or delete samples; it stretches/compresses playback
+  timing within the clamp (see LTC_MODULE.md)
 
 ## Implementation Phases
 

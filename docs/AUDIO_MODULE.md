@@ -26,12 +26,15 @@ Three layers cooperate:
    system manages. On Linux, `OutputStreamLinux` / `InputStreamLinux`
    open an ALSA PCM device (`snd_pcm_*`) and run a dedicated thread
    whose priority follows `AudioConfig::thread_priority`. Both backends
-   negotiate hardware parameters at construction, so the `effective_*`
-   accessors may differ from what was requested.
-2. **Provider abstraction.** `IDeviceProvider` and `IStreamFactory`
-   sit between callers and the backend. Tests swap in
-   `MockDeviceProvider` / `MockStreamFactory` (typically via the RAII
-   `ProviderGuard`) to run without hardware.
+   negotiate hardware parameters in `start()`, so the `effective_*`
+   accessors are only meaningful after `start()` and may differ from what
+   was requested (before `start()` they report defaults).
+2. **Provider abstraction.** `IDeviceProvider` / `IStreamFactory` and the
+   RAII `ProviderGuard` exist for dependency injection, but the current
+   `OutputStream::create` / `InputStream::create` construct the platform
+   backend directly rather than routing through the factory. Tests that
+   need to run without hardware instantiate `MockOutputStream` /
+   `MockInputStream` directly.
 3. **In-callback helpers.** `AudioRing<T>` and `AudioPresentationQueue<T>`
    are SPSC, lock-free, and pre-sized via `std::pmr::memory_resource`
    so the audio thread never allocates. `AudioRing` is FIFO for
@@ -148,8 +151,8 @@ int main()
 - **Callback is real-time.** On both backends the audio callback runs on a thread that must not block, allocate, take locks, log to stdio, or call APIs that page-fault. `AudioCallback<T>` caps capture state at 64 bytes (`inplace_function<…, 64>`); spilling allocates and will fail to compile-into the slot.
 - **Non-interleaved float32 by default.** `AudioConfig::non_interleaved` is `true` and `format` is `SampleFormat::Float32`; the callback receives one `InputAudioBuffer<T>` / `OutputAudioBuffer<T>` per channel, each holding a per-channel `std::span`. Other formats require conversion via `audio_convert.hpp` before / after the callback.
 - **`start()` / `stop()` are not thread-safe with each other.** Serialize from one thread (typically the owner). All read-only accessors are safe concurrently. `stop()` is idempotent.
-- **`effective_*` may differ from `config()`.** Both ALSA and CoreAudio negotiate the actual rate, period, and buffer size with hardware. Use `effective_sample_rate()` / `effective_period_frames()` / `effective_buffer_frames()` after `create()` if any downstream code depends on the real values.
-- **Thread priority is best-effort.** `ThreadPriority::Elevated` tries SCHED_FIFO and silently falls back to normal if the process lacks `CAP_SYS_NICE`; `ThreadPriority::Realtime` fails the start call if it cannot get RT priority. On macOS the CoreAudio thread is system-managed.
+- **`effective_*` may differ from `config()`.** Both ALSA and CoreAudio negotiate the actual rate, period, and buffer size with hardware. Use `effective_sample_rate()` / `effective_period_frames()` / `effective_buffer_frames()` after `start()` if any downstream code depends on the real values (they return placeholder defaults before `start()` negotiates).
+- **Thread priority is best-effort.** `ThreadPriority::Elevated` tries SCHED_FIFO and silently falls back to normal if the process lacks `CAP_SYS_NICE`; `ThreadPriority::Realtime` requests SCHED_FIFO on the audio thread after `start()` returns; on Linux, if it cannot obtain RT priority the thread stops the stream rather than failing the original `start()` call. On macOS the CoreAudio thread is system-managed.
 - **`AudioRing` and `AudioPresentationQueue` are strictly SPSC.** One producer thread for `push()` / `write()`, one consumer for `pop()` / `read()` / `advance()`; `available_*` / `center_time()` / `can_*` are safe from either side. Storage comes from a `std::pmr::memory_resource` — pass an arena-backed one to guarantee no heap activity in the callback. `AudioRing::push` of fewer channels than the ring holds fills the unspecified channels with silence (write_pos advances for all channels, so they would otherwise expose stale wrapped samples). `AudioPresentationQueue::read` zeros each slot as it consumes it, so late / missing samples appear as silence rather than as data from a previous wrap.
 - **`AudioCallback` return value.** Returning `failure()` from the callback signals the stream to stop. The CoreAudio thread will not call again; the ALSA loop drops out after the current period.
 - **Mocks run a real thread.** `MockOutputStream` / `MockInputStream` spawn a `std::thread` that calls the user callback every `callback_frames` worth of simulated time. Install them through `ProviderGuard` so the swap is undone on destruction.

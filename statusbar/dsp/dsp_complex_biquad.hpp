@@ -49,6 +49,34 @@ struct ComplexFirstOrderState
     }
 };
 
+/// Process one real sample through a cascaded pair of complex first-order
+/// sections, advancing both stages' state in place, and return the real output.
+/// The single definition of the biquad kernel: ComplexBiQuad and the engine's
+/// Tier-0 BiquadApply both call this rather than each hand-inlining the math.
+/// All arithmetic is lane-wise for SIMD T.
+template <typename T>
+[[nodiscard]] inline auto process_complex_biquad_sample(
+    ComplexFirstOrderCoeffs<T> const& c1, ComplexFirstOrderCoeffs<T> const& c2, ComplexFirstOrderState<T>& s1,
+    ComplexFirstOrderState<T>& s2, T const& input) noexcept -> T
+{
+    // Stage 1: real input -> complex output. y = a0 * x + s (complex a0, real x).
+    T const y1_re = (c1.a0_re * input) + s1.re;
+    T const y1_im = (c1.a0_im * input) + s1.im;
+    // s_next = a1 * x - b1 * y (complex multiply).
+    s1.re = (c1.a1_re * input) - (c1.b1_re * y1_re) + (c1.b1_im * y1_im);
+    s1.im = (c1.a1_im * input) - (c1.b1_re * y1_im) - (c1.b1_im * y1_re);
+
+    // Stage 2: complex input -> real output. out = a0 * y1 + s2 (full complex mul).
+    T const out_re = (c2.a0_re * y1_re) - (c2.a0_im * y1_im) + s2.re;
+    T const out_im = (c2.a0_re * y1_im) + (c2.a0_im * y1_re) + s2.im;
+    // s2_next = a1 * y1 - b1 * out (complex multiplies).
+    s2.re = (c2.a1_re * y1_re) - (c2.a1_im * y1_im) - (c2.b1_re * out_re) + (c2.b1_im * out_im);
+    s2.im = (c2.a1_re * y1_im) + (c2.a1_im * y1_re) - (c2.b1_re * out_im) - (c2.b1_im * out_re);
+
+    (void)out_im;  // ~0 for real input
+    return out_re;
+}
+
 // ---------------------------------------------------------------------------
 // Coefficient factorization helpers (f64 arithmetic)
 // ---------------------------------------------------------------------------
@@ -105,17 +133,20 @@ inline auto factor_biquad_to_two_stages(double const a0, double const a1, double
         zeros = factor_quadratic(na1, na2);
     }
 
-    // Split gain: g = sqrt(a0), so g*g = a0
+    // Split gain across the two stages: g = sqrt(|a0|), so g*g = |a0|. Carry
+    // the sign of a0 in stage 1 (g1 = ±g) so g1*g = a0 for either sign — a plain
+    // sqrt(a0) would be NaN for a negative leading coefficient.
     //
     // Stage k: H_k(z) = g * (1 - z_k*z^-1) / (1 - p_k*z^-1)
     //        = (g - g*z_k*z^-1) / (1 + (-p_k)*z^-1)
     //
     // In TDFII: c_a0 = g, c_a1 = -g*z_k, c_b1 = -p_k
-    double const g = std::sqrt(a0);
+    double const g = std::sqrt(std::abs(a0));
+    double const g1 = (a0 < 0.0) ? -g : g;
 
     return TwoStageCoeffsF64{
-        .s1_a0 = {g, 0.0},
-        .s1_a1 = -g * zeros.r1,
+        .s1_a0 = {g1, 0.0},
+        .s1_a1 = -g1 * zeros.r1,
         .s1_b1 = -poles.r1,
         .s2_a0 = {g, 0.0},
         .s2_a1 = -g * zeros.r2,
@@ -250,29 +281,7 @@ struct ComplexBiQuad
     /// Process a single sample through both cascaded stages.
     [[nodiscard]] auto operator()(T const& input) noexcept -> T
     {
-        auto const& c1 = coeffs.stage1;
-        auto const& c2 = coeffs.stage2;
-
-        // Stage 1: real input -> complex output
-        // y = a0 * x + s  (complex a0, real x)
-        T const y1_re = (c1.a0_re * input) + state.stage1.re;
-        T const y1_im = (c1.a0_im * input) + state.stage1.im;
-
-        // s_next = a1 * x - b1 * y  (complex multiply)
-        state.stage1.re = (c1.a1_re * input) - (c1.b1_re * y1_re) + (c1.b1_im * y1_im);
-        state.stage1.im = (c1.a1_im * input) - (c1.b1_re * y1_im) - (c1.b1_im * y1_re);
-
-        // Stage 2: complex input (y1_re, y1_im) -> real output
-        // out = a0_s2 * y1 + s2  (full complex multiply)
-        T const out_re = (c2.a0_re * y1_re) - (c2.a0_im * y1_im) + state.stage2.re;
-        T const out_im = (c2.a0_re * y1_im) + (c2.a0_im * y1_re) + state.stage2.im;
-
-        // s2_next = a1_s2 * y1 - b1_s2 * out  (complex multiplies)
-        state.stage2.re = (c2.a1_re * y1_re) - (c2.a1_im * y1_im) - (c2.b1_re * out_re) + (c2.b1_im * out_im);
-        state.stage2.im = (c2.a1_re * y1_im) + (c2.a1_im * y1_re) - (c2.b1_re * out_im) - (c2.b1_im * out_re);
-
-        (void)out_im;  // Should be ~0 for real input
-        return out_re;
+        return process_complex_biquad_sample(coeffs.stage1, coeffs.stage2, state.stage1, state.stage2, input);
     }
 };
 

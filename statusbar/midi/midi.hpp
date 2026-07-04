@@ -10,7 +10,7 @@
 /// - SysexMessage<N>: Template-parameterized sysex buffer (default 1024 bytes)
 /// - MetaEvent: Non-owning view into MIDI meta event data
 /// - MidiParser<N>: Byte-by-byte stream parser with lambda callbacks
-/// - read_midi_file<N>(): MIDI file reader for Type 0 and Type 1 files
+/// - read_midi_file(): MIDI file reader for Type 0 and Type 1 files
 /// - MidiFileWriter: Stateful builder for writing MIDI files
 ///
 /// Usage:

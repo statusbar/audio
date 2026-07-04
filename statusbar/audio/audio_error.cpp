@@ -37,6 +37,8 @@ auto AudioErrorCategory::message(int const ev) const -> std::string
             return "Audio stream is already running";
         case AudioError::InitializationFailed:
             return "Failed to initialize audio system";
+        case AudioError::RealtimePriorityDenied:
+            return "Could not obtain the requested realtime thread priority";
         default:
             return "Unknown audio error";
     }

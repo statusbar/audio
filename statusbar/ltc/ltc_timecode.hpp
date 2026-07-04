@@ -286,7 +286,10 @@ struct Timecode
 
     /// Comparison operators
     /// \param other Timecode to compare against (by frame count)
-    constexpr auto operator<=>(Timecode const& other) const noexcept -> std::strong_ordering
+    /// \note weak_ordering, not strong: two timecodes can be ordering-equivalent
+    ///       (same frame count, e.g. different rates or user bits) without being
+    ///       operator== — strong_ordering would falsely promise substitutability.
+    constexpr auto operator<=>(Timecode const& other) const noexcept -> std::weak_ordering
     {
         // Compare by frame count for proper ordering
         return to_frame_count() <=> other.to_frame_count();

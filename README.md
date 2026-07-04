@@ -2,7 +2,7 @@
 
 Audio toolkit — DSP primitives, the real-time data-flow engine, low-latency cross-platform audio I/O, SMPTE timecode, MIDI, and Open Sound Control.
 
-Version 1.3.0.
+Version 1.4.0.
 
 > Portions of this repository were developed with assistance from Claude,
 > an AI model by Anthropic. All reference material used in this process
@@ -44,7 +44,7 @@ depends only on `statusbar-core`.
 ./local-build.sh -DENABLE_TSAN=ON     # ThreadSanitizer
 ```
 
-No fuzz harnesses live in this package. Depends on `statusbar-core`. See the sections below for details.
+Fuzz harnesses cover the MIDI and OSC parsers (build with `-DENABLE_FUZZING=ON`; see [Fuzz testing](#fuzz-testing)). Depends on `statusbar-core`. See the sections below for details.
 
 ## Modules
 
@@ -154,7 +154,11 @@ xdg-open build-cov/coverage/html/index.html   # or `open` on macOS
 
 ## Fuzz testing
 
-This package ships no fuzz harnesses of its own.
+libFuzzer harnesses cover the untrusted-byte parsers: the MIDI Standard-MIDI-File
+reader (`midi_file_reader_fuzzer`), the byte-by-byte MIDI stream parser
+(`midi_parser_fuzzer`), and the OSC wire-format decoder (`osc_deserializer_fuzzer`).
+They build only under `-DENABLE_FUZZING=ON` and run via the repo's
+`container-fuzz.sh` (or the auto-discovered `fuzz-smoke` / `fuzz-all` targets).
 
 ## Sanitizers
 

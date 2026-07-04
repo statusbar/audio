@@ -37,38 +37,21 @@ class BiquadApply
 
     [[nodiscard]] auto operator()(BiquadComplexCoeffs<T> const& c, T input) noexcept -> T
     {
-        auto const& c1 = c.stage1;
-        auto const& c2 = c.stage2;
-
-        // Stage 1: real input → complex output.
-        T const y1_re = (c1.a0_re * input) + state1_re_;
-        T const y1_im = (c1.a0_im * input) + state1_im_;
-        state1_re_ = (c1.a1_re * input) - (c1.b1_re * y1_re) + (c1.b1_im * y1_im);
-        state1_im_ = (c1.a1_im * input) - (c1.b1_re * y1_im) - (c1.b1_im * y1_re);
-
-        // Stage 2: complex input → real output (out_im is ~0 for real input).
-        T const out_re = (c2.a0_re * y1_re) - (c2.a0_im * y1_im) + state2_re_;
-        T const out_im = (c2.a0_re * y1_im) + (c2.a0_im * y1_re) + state2_im_;
-        state2_re_ = (c2.a1_re * y1_re) - (c2.a1_im * y1_im) - (c2.b1_re * out_re) + (c2.b1_im * out_im);
-        state2_im_ = (c2.a1_re * y1_im) + (c2.a1_im * y1_re) - (c2.b1_re * out_im) - (c2.b1_im * out_re);
-
-        (void)out_im;
-        return out_re;
+        // Shared kernel — see dsp::process_complex_biquad_sample. The engine and
+        // dsp::ComplexBiQuad differ only in how they store coeffs/state, not in
+        // the biquad math, so the math lives in one place.
+        return statusbar::dsp::process_complex_biquad_sample(c.stage1, c.stage2, state1_, state2_, input);
     }
 
     void reset_state() noexcept
     {
-        statusbar::dsp::zero(state1_re_);
-        statusbar::dsp::zero(state1_im_);
-        statusbar::dsp::zero(state2_re_);
-        statusbar::dsp::zero(state2_im_);
+        state1_.reset();
+        state2_.reset();
     }
 
   private:
-    T state1_re_;
-    T state1_im_;
-    T state2_re_;
-    T state2_im_;
+    statusbar::dsp::ComplexFirstOrderState<T> state1_;
+    statusbar::dsp::ComplexFirstOrderState<T> state2_;
 };
 
 // Convenience alias: a Tier 0 biquad element parameterized by sample

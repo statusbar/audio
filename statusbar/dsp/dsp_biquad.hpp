@@ -131,11 +131,14 @@ struct BiQuad
             ComplexType const one(1.0, 0.0);
             ComplexType const z2 = z1 * z1;
 
-            T const c_a0 = get_flattened_item(a0, channel);
-            T const c_a1 = get_flattened_item(a1, channel);
-            T const c_a2 = get_flattened_item(a2, channel);
-            T const c_b1 = get_flattened_item(b1, channel);
-            T const c_b2 = get_flattened_item(b2, channel);
+            // Flattened scalar (item_type), not T: for a SIMD T the vector's
+            // scalar constructor is explicit, so `T c = get_flattened_item(...)`
+            // fails to compile — the per-channel z-domain response is scalar.
+            item_type const c_a0 = get_flattened_item(a0, channel);
+            item_type const c_a1 = get_flattened_item(a1, channel);
+            item_type const c_a2 = get_flattened_item(a2, channel);
+            item_type const c_b1 = get_flattened_item(b1, channel);
+            item_type const c_b2 = get_flattened_item(b2, channel);
 
             ComplexType const numerator = c_a0 + (c_a1 * z1) + (c_a2 * z2);
             ComplexType const denominator = one + (c_b1 * z1) + (c_b2 * z2);

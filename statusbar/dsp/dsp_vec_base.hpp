@@ -66,8 +66,60 @@ consteval auto simd_alignment() noexcept -> std::size_t
 /// simd_float32x4 a{1.0F, 2.0F, 3.0F, 4.0F};
 /// simd_float32x4 b = simd_float32x4::splat(2.0F);
 /// simd_float32x4 c = a * b;  // {2.0F, 4.0F, 6.0F, 8.0F}
-/// float sum = c.hsum();      // 18.0f
+/// float sum = c.hsum();      // 20.0f
 /// @endcode
+/// Arch-independent container / iterator interface shared by every SIMDVec
+/// intrinsic specialization. A specialization supplies the
+/// `union { internal_type vec_; value_type item_[N]; }` and the intrinsic ops;
+/// everything here operates only on the scalar `item_[]` view, so this boilerplate
+/// lives once instead of being copy-pasted into each arch header. Uses C++23
+/// explicit object parameters ("deducing this") so the accessors reach the
+/// derived's `item_` directly — no CRTP type parameter, no static_cast.
+template <typename ValueType, std::size_t N>
+class SIMDVecContainer
+{
+  public:
+    using value_type = ValueType;
+    using pointer = value_type*;
+    using const_pointer = value_type const*;
+    using reference = value_type&;
+    using const_reference = value_type const&;
+    using iterator = pointer;
+    using const_iterator = const_pointer;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+
+    static constexpr size_type vector_size = N;
+
+    [[nodiscard]] static constexpr size_type size() noexcept { return N; }
+    [[nodiscard]] static constexpr size_type max_size() noexcept { return N; }
+    [[nodiscard]] static constexpr bool empty() noexcept { return false; }
+
+    [[nodiscard]] constexpr auto data(this auto&& self) noexcept { return self.item_; }
+
+    [[nodiscard]] constexpr decltype(auto) operator[](this auto&& self, size_type index) noexcept
+    {
+        return self.item_[index];
+    }
+
+    [[nodiscard]] constexpr decltype(auto) at(this auto&& self, size_type index)
+    {
+        if (index >= N) {
+            detail::out_of_range("SIMDVec index out of range");
+        }
+        return self.item_[index];
+    }
+
+    [[nodiscard]] constexpr decltype(auto) front(this auto&& self) noexcept { return self.item_[0]; }
+    [[nodiscard]] constexpr decltype(auto) back(this auto&& self) noexcept { return self.item_[N - 1]; }
+
+    [[nodiscard]] constexpr auto begin(this auto&& self) noexcept { return self.item_; }
+    [[nodiscard]] constexpr auto end(this auto&& self) noexcept { return self.item_ + N; }
+    // cbegin/cend always yield a const pointer, regardless of object constness.
+    [[nodiscard]] constexpr auto cbegin(this auto&& self) noexcept -> const_iterator { return self.item_; }
+    [[nodiscard]] constexpr auto cend(this auto&& self) noexcept -> const_iterator { return self.item_ + N; }
+};
+
 template <typename T, std::size_t N>
 class alignas(simd_alignment<T, N>()) SIMDVec
 {

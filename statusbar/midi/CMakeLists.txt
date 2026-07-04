@@ -25,3 +25,7 @@ add_executable(midi_copy_tool midi_copy_tool.cpp)
 target_link_libraries(midi_copy_tool PRIVATE statusbar)
 set_target_properties(midi_copy_tool PROPERTIES OUTPUT_NAME statusbar-midi-copy)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS midi_copy_tool)
+
+# Fuzz harnesses for the untrusted-byte parsers (no-op unless ENABLE_FUZZING).
+add_audio_fuzzer(${CMAKE_CURRENT_LIST_DIR}/midi_file_reader_fuzzer.cpp)
+add_audio_fuzzer(${CMAKE_CURRENT_LIST_DIR}/midi_parser_fuzzer.cpp)

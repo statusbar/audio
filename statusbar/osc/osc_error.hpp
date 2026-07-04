@@ -27,6 +27,7 @@ enum class OscError
     string_not_terminated = 8,  ///< String missing null terminator
     type_mismatch = 9,          ///< Argument type doesn't match requested type
     invalid_message = 10,       ///< Message format is invalid
+    bundle_too_deep = 11,       ///< Bundle nesting exceeds OSC_MAX_BUNDLE_DEPTH
 };
 
 //

@@ -946,6 +946,7 @@ TEST(audio_error, all_errors_have_messages)
     check(AudioError::StreamNotRunning);
     check(AudioError::AlreadyRunning);
     check(AudioError::InitializationFailed);
+    check(AudioError::RealtimePriorityDenied);
 }
 
 TEST(audio_error, category_name)

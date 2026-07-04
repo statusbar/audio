@@ -3,6 +3,8 @@
 
 #include "statusbar/midi/midi_file_reader.hpp"
 
+#include "statusbar/buffer/span_utils.hpp"
+#include "statusbar/ieee/ieee.hpp"
 #include "statusbar/midi/midi_detail.hpp"
 #include "statusbar/midi/midi_error.hpp"
 #include "statusbar/midi/midi_meta.hpp"
@@ -17,14 +19,18 @@ namespace statusbar::midi {
 
 namespace {
 
+// SMF multi-byte fields are big-endian; ieee::doublet_t / quadlet_t convert to
+// host on read, span_load fills their bytes. Bounds are checked first (span_load
+// asserts on a short span).
 auto read_u16(std::span<uint8_t const> data, size_t& offset) -> StatusValue<uint16_t>
 {
     if (offset + 2 > data.size()) {
         return failure(MidiError::unexpected_eof);
     }
-    auto const val = static_cast<uint16_t>(data[offset] << 8 | data[offset + 1]);
+    statusbar::ieee::doublet_t d{};
+    span_load(d, data.subspan(offset, 2));
     offset += 2;
-    return val;
+    return static_cast<uint16_t>(d);
 }
 
 auto read_u32(std::span<uint8_t const> data, size_t& offset) -> StatusValue<uint32_t>
@@ -32,10 +38,10 @@ auto read_u32(std::span<uint8_t const> data, size_t& offset) -> StatusValue<uint
     if (offset + 4 > data.size()) {
         return failure(MidiError::unexpected_eof);
     }
-    auto const val = static_cast<uint32_t>(data[offset]) << 24 | static_cast<uint32_t>(data[offset + 1]) << 16 |
-        static_cast<uint32_t>(data[offset + 2]) << 8 | static_cast<uint32_t>(data[offset + 3]);
+    statusbar::ieee::quadlet_t q{};
+    span_load(q, data.subspan(offset, 4));
     offset += 4;
-    return val;
+    return static_cast<uint32_t>(q);
 }
 
 // Track-event handlers. Caller has already advanced `offset` past the
@@ -116,10 +122,9 @@ auto handle_channel_message(
     uint8_t d1 = 0;
     uint8_t d2 = 0;
     if (event_byte >= 0x80) {
-        running_status = event_byte;
         status = event_byte;
         ++offset;
-        auto const count = data_byte_count(running_status);
+        auto const count = data_byte_count(event_byte);
         if (count < 0 || offset + count > track_end_offset) {
             on_error(MidiError::unexpected_eof);
             return false;
@@ -127,6 +132,9 @@ auto handle_channel_message(
         d1 = count >= 1 ? data[offset] : 0;
         d2 = count >= 2 ? data[offset + 1] : 0;
         offset += count;
+        // Channel-voice status (0x80-0xEF) enables running status; a
+        // system-common status (0xF1-0xF6) cancels it per the MIDI spec.
+        running_status = event_byte < 0xF0 ? event_byte : 0;
     } else {
         if (running_status == 0) {
             on_error(MidiError::invalid_status);

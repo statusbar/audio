@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/dsp/dsp_complex_biquad.hpp"
+#include "statusbar/dsp/dsp_constants.hpp"
 #include "statusbar/dsp/dsp_vec_base.hpp"
 #include "statusbar/engine/engine_segment.hpp"
 
@@ -41,6 +42,18 @@ struct BiquadComplexCoeffs
 {
     statusbar::dsp::ComplexFirstOrderCoeffs<T> stage1{};
     statusbar::dsp::ComplexFirstOrderCoeffs<T> stage2{};
+
+    // Identity (bypass) coefficients: H(z) = 1. Each first-order stage gets
+    // a0_re = 1 with every other term 0, so the cascade passes signal through
+    // unchanged. Default-constructed coeffs are all-zero — i.e. silence — so
+    // prime an element with identity() when it should start transparent.
+    [[nodiscard]] static auto identity() noexcept -> BiquadComplexCoeffs
+    {
+        BiquadComplexCoeffs r{};
+        r.stage1.a0_re = statusbar::dsp::constants::one<T>();
+        r.stage2.a0_re = statusbar::dsp::constants::one<T>();
+        return r;
+    }
 };
 
 template <typename T>

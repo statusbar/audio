@@ -439,10 +439,10 @@ TEST(engine_biquad_element, simd_apply_runs_lane_wise)
 
 TEST(engine_bode, identity_biquad_has_unity_magnitude_at_all_frequencies)
 {
-    // Bypass biquad: a0 = 1, all other coeffs zero ⇒ H(z) = 1 for any z.
-    BiquadComplexCoeffs<float> bypass{};
-    bypass.stage1.a0_re = 1.0F;  // stage1: H1 = 1 / 1 = 1
-    bypass.stage2.a0_re = 1.0F;  // stage2: H2 = 1 / 1 = 1
+    // Identity biquad: a0 = 1, all other coeffs zero ⇒ H(z) = 1 for any z.
+    auto const bypass = BiquadComplexCoeffs<float>::identity();
+    EXPECT_EQ(bypass.stage1.a0_re, 1.0F);
+    EXPECT_EQ(bypass.stage2.a0_re, 1.0F);
     constexpr double sr_recip = 1.0 / 48000.0;
     for (double f : {20.0, 100.0, 1000.0, 5000.0, 20000.0}) {
         auto const bp = bode_point_at_frequency(bypass, f, sr_recip);

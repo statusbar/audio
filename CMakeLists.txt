@@ -95,7 +95,7 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/statusbar-audio)
   write_basic_package_version_file(
     ${CMAKE_CURRENT_BINARY_DIR}/statusbar-audioConfigVersion.cmake
-    VERSION 1.4.0
+    VERSION ${PROJECT_VERSION}
     COMPATIBILITY AnyNewerVersion)
   install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/statusbar-audioConfig.cmake
@@ -120,7 +120,7 @@ endif()
 if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_PACKAGE_NAME "statusbar-audio")
   set(CPACK_PACKAGE_VENDOR "Jeff Koftinoff")
-  set(CPACK_PACKAGE_VERSION "1.4.0")
+  set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "Audio toolkit — DSP primitives, the real-time data-flow engine, low-latency cross-platform audio I/O, SMPTE timecode, MIDI, and Open Sound Control."
   )

@@ -23,9 +23,19 @@ namespace statusbar::dsp {
 /// @return Rounded value as int64_t
 [[nodiscard]] constexpr auto lround(double x) noexcept -> int64_t
 {
-    // For positive: floor(x + 0.5), for negative: ceil(x - 0.5)
-    // This matches std::lround behavior (round half away from zero)
-    return static_cast<int64_t>(x >= 0.0 ? x + 0.5 : x - 0.5);
+    // Truncate toward zero, then bump away from zero when the remaining fraction
+    // reaches a half. The naive `x + 0.5` cast double-rounds — e.g. the largest
+    // double below 0.5 (0.49999999999999994) becomes 1.0 and yields 1 — so we
+    // compare the fraction directly instead.
+    int64_t const t = static_cast<int64_t>(x);
+    double const frac = x - static_cast<double>(t);
+    if (frac >= 0.5) {
+        return t + 1;
+    }
+    if (frac <= -0.5) {
+        return t - 1;
+    }
+    return t;
 }
 
 /// Constexpr round to nearest integer (float), ties away from zero (like std::lround)
@@ -33,7 +43,15 @@ namespace statusbar::dsp {
 /// @return Rounded value as int64_t
 [[nodiscard]] constexpr auto lround(float x) noexcept -> int64_t
 {
-    return static_cast<int64_t>(x >= 0.0F ? x + 0.5F : x - 0.5F);
+    int64_t const t = static_cast<int64_t>(x);
+    float const frac = x - static_cast<float>(t);
+    if (frac >= 0.5F) {
+        return t + 1;
+    }
+    if (frac <= -0.5F) {
+        return t - 1;
+    }
+    return t;
 }
 
 // Compile-time verification of lround correctness
@@ -48,6 +66,7 @@ static_assert(lround(-1.5) == -2, "lround(-1.5) should round away from zero to -
 static_assert(lround(-1.6) == -2, "lround(-1.6) should round away from zero to -2");
 static_assert(lround(2.5) == 3, "lround(2.5) should round to 3");
 static_assert(lround(-2.5) == -3, "lround(-2.5) should round to -3");
+static_assert(lround(0.49999999999999994) == 0, "largest double below 0.5 must round to 0, not 1");
 
 //
 // Floating Point Comparison

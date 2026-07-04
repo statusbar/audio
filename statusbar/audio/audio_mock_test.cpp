@@ -165,6 +165,44 @@ TEST(mock_output, start_stop)
     EXPECT_EQ(stream.callback_count(), 5);
 }
 
+TEST(mock_output, restart_after_self_stop)
+{
+    // A stream that self-stops (max_callbacks reached) leaves its thread
+    // joinable; a naive restart would assign over it and std::terminate.
+    // Restarting — with or without an intervening stop() — must be safe.
+    auto device = make_mock_device("Test", "test", 0, 2);
+    AudioConfig config{.sample_rate = SampleRate::Rate_48000, .channels = 2, .buffer_frames = 256};
+    MockOutputStream::MockConfig mock_cfg{.callback_frames = 128, .max_callbacks = 3};
+
+    MockOutputStream stream(device, config, mock_cfg);
+
+    auto const silence = [](AudioCallbackParamsFloat const& params) -> statusbar::Status {
+        for (auto& buf : params.output_buffers) {
+            for (auto& sample : buf.sample) {
+                sample = 0.0f;
+            }
+        }
+        return statusbar::success();
+    };
+
+    EXPECT_TRUE(stream.start(silence).has_value());
+    while (stream.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Restart directly, without stop() — start() must join the lingering thread.
+    EXPECT_TRUE(stream.start(silence).has_value());
+    while (stream.is_running()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // And a stop() after a self-stop, then restart, is also safe.
+    stream.stop();
+    EXPECT_TRUE(stream.start(silence).has_value());
+    stream.stop();
+    EXPECT_FALSE(stream.is_running());
+}
+
 TEST(mock_output, capture_output)
 {
     auto device = make_mock_device("Test", "test", 0, 2);

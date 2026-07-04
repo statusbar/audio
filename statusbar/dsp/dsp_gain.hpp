@@ -31,9 +31,9 @@ struct Gain
 
     struct Coeffs
     {
-        T amplitude;
-        T time_constant;
-        T one_minus_time_constant;
+        T amplitude{};
+        T time_constant{};
+        T one_minus_time_constant{};
 
         /// Set the target amplitude (linear gain)
         ///
