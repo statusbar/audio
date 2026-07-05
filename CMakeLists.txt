@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 project(
   statusbar-audio
-  VERSION 1.4.0
+  VERSION 1.6.0
   LANGUAGES CXX)
 
 include(GNUInstallDirs)
