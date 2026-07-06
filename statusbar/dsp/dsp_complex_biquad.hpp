@@ -56,8 +56,11 @@ struct ComplexFirstOrderState
 /// All arithmetic is lane-wise for SIMD T.
 template <typename T>
 [[nodiscard]] inline auto process_complex_biquad_sample(
-    ComplexFirstOrderCoeffs<T> const& c1, ComplexFirstOrderCoeffs<T> const& c2, ComplexFirstOrderState<T>& s1,
-    ComplexFirstOrderState<T>& s2, T const& input) noexcept -> T
+    ComplexFirstOrderCoeffs<T> const& c1,
+    ComplexFirstOrderCoeffs<T> const& c2,
+    ComplexFirstOrderState<T>& s1,
+    ComplexFirstOrderState<T>& s2,
+    T const& input) noexcept -> T
 {
     // Stage 1: real input -> complex output. y = a0 * x + s (complex a0, real x).
     T const y1_re = (c1.a0_re * input) + s1.re;

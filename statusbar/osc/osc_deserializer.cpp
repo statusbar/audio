@@ -312,8 +312,7 @@ auto osc_deserialize_message(std::span<uint8_t const> buffer, size_t& bytes_cons
 
 namespace {
 
-auto deserialize_bundle_at_depth(std::span<uint8_t const> buffer, size_t& bytes_consumed, size_t depth)
-    -> StatusValue<OscBundle>
+auto deserialize_bundle_at_depth(std::span<uint8_t const> buffer, size_t& bytes_consumed, size_t depth) -> StatusValue<OscBundle>
 {
     if (depth > OSC_MAX_BUNDLE_DEPTH) {
         return failure(OscError::bundle_too_deep);

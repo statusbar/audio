@@ -15,17 +15,17 @@ namespace statusbar::audio {
 /// Audio error codes
 enum class AudioError : uint32_t
 {
-    None = 0,                   ///< No error
-    DeviceNotFound = 1,         ///< Requested device not found
-    InvalidConfig = 2,          ///< Invalid configuration parameters
-    DeviceBusy = 3,             ///< Device is busy or in use
-    HardwareError = 4,          ///< Hardware or driver error
-    CallbackError = 5,          ///< Error in user callback
-    BufferUnderrun = 6,         ///< Audio buffer underrun
-    BufferOverrun = 7,          ///< Audio buffer overrun
-    UnsupportedFormat = 8,      ///< Sample format not supported
-    UnsupportedSampleRate = 9,  ///< Sample rate not supported
-    StreamNotRunning = 10,      ///< Operation requires running stream
+    None = 0,                     ///< No error
+    DeviceNotFound = 1,           ///< Requested device not found
+    InvalidConfig = 2,            ///< Invalid configuration parameters
+    DeviceBusy = 3,               ///< Device is busy or in use
+    HardwareError = 4,            ///< Hardware or driver error
+    CallbackError = 5,            ///< Error in user callback
+    BufferUnderrun = 6,           ///< Audio buffer underrun
+    BufferOverrun = 7,            ///< Audio buffer overrun
+    UnsupportedFormat = 8,        ///< Sample format not supported
+    UnsupportedSampleRate = 9,    ///< Sample rate not supported
+    StreamNotRunning = 10,        ///< Operation requires running stream
     AlreadyRunning = 11,          ///< Stream is already running
     InitializationFailed = 12,    ///< Failed to initialize audio system
     RealtimePriorityDenied = 13,  ///< Could not obtain the requested realtime thread priority

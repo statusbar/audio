@@ -97,10 +97,7 @@ class SIMDVecContainer
 
     [[nodiscard]] constexpr auto data(this auto&& self) noexcept { return self.item_; }
 
-    [[nodiscard]] constexpr decltype(auto) operator[](this auto&& self, size_type index) noexcept
-    {
-        return self.item_[index];
-    }
+    [[nodiscard]] constexpr decltype(auto) operator[](this auto&& self, size_type index) noexcept { return self.item_[index]; }
 
     [[nodiscard]] constexpr decltype(auto) at(this auto&& self, size_type index)
     {

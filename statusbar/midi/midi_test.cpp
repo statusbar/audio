@@ -884,8 +884,8 @@ TEST(midi_file_write, sysex_f7_escape_roundtrips)
 
     EXPECT_TRUE(is_success(writer.write_header(0, 1, 480)));
     EXPECT_TRUE(is_success(writer.begin_track()));
-    EXPECT_TRUE(is_success(writer.write_sysex(0, normal_body)));                  // 0xF0 default
-    EXPECT_TRUE(is_success(writer.write_sysex(10, escape_body, 0xF7)));           // F7 escape
+    EXPECT_TRUE(is_success(writer.write_sysex(0, normal_body)));         // 0xF0 default
+    EXPECT_TRUE(is_success(writer.write_sysex(10, escape_body, 0xF7)));  // F7 escape
     EXPECT_TRUE(is_success(writer.write_end_of_track(10)));
     EXPECT_TRUE(is_success(writer.end_track()));
 

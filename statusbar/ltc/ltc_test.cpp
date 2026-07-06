@@ -576,16 +576,20 @@ TEST(frame, polarity_even_parity_all_rates)
     // ones, so an implementation that forgets to include it (or the user bits)
     // fails here.
     FrameRate const rates[] = {
-        FrameRate::Rate_23_976, FrameRate::Rate_24,        FrameRate::Rate_25,    FrameRate::Rate_29_97_DF,
-        FrameRate::Rate_29_97_NDF, FrameRate::Rate_30_DF,  FrameRate::Rate_30_NDF};
+        FrameRate::Rate_23_976,
+        FrameRate::Rate_24,
+        FrameRate::Rate_25,
+        FrameRate::Rate_29_97_DF,
+        FrameRate::Rate_29_97_NDF,
+        FrameRate::Rate_30_DF,
+        FrameRate::Rate_30_NDF};
     uint32_t const user_bit_patterns[] = {0x00000000u, 0xFFFFFFFFu, 0xA5A5A5A5u, 0x12345678u};
 
     for (auto const rate : rates) {
         for (auto const ubits : user_bit_patterns) {
             for (uint8_t h = 0; h < 24; h += 7) {
                 for (uint8_t s = 0; s < 60; s += 13) {
-                    Timecode tc{
-                        .hours = h, .minutes = 45, .seconds = s, .frames = 12, .user_bits = ubits, .rate = rate};
+                    Timecode tc{.hours = h, .minutes = 45, .seconds = s, .frames = 12, .user_bits = ubits, .rate = rate};
                     LTCFrame frame(tc);
                     EXPECT_EQ(frame_one_bits(frame) % 2, size_t{0});
                 }

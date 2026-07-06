@@ -1318,7 +1318,7 @@ TEST(osc_decoder_safety, bundle_element_size_not_multiple_of_4_rejected)
     // elem_size = 6 is within bounds but not 4-byte aligned; must be rejected
     // with invalid_alignment (all OSC data is 4-byte aligned).
     std::array<uint8_t, 26> buf{
-        '#',  'b',  'u',  'n',  'd', 'l', 'e', '\0', 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, 0x00, 0x06,  // elem_size = 6
+        '#',  'b',  'u',  'n',  'd',  'l',  'e', '\0', 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, 0x00, 0x06,  // elem_size = 6
         0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
     };
     auto const result = deserialize_bundle(buf);
