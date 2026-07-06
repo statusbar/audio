@@ -51,8 +51,9 @@ function(add_audio_fuzzer source_file)
     target_compile_options(
       ${FUZZ_NAME} PRIVATE -fsanitize=fuzzer,address,undefined
                            -fno-omit-frame-pointer)
-    target_link_options(${FUZZ_NAME} PRIVATE -fsanitize=fuzzer,address,undefined
-                        ${FUZZER_EXTRA_LINK_OPTIONS})
+    target_link_options(
+      ${FUZZ_NAME} PRIVATE -fsanitize=fuzzer,address,undefined
+      ${FUZZER_EXTRA_LINK_OPTIONS})
   endif()
 endfunction()
 

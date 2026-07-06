@@ -125,8 +125,7 @@ auto process_servo_callback(
         // current frame's waveform, so reserve it for a genuine discontinuity.
         auto const rt_tc = Timecode::from_realtime(state.frame_rate, local_time, millis, state.time_offset_seconds);
         auto const& cur_tc = state.servo->current_timecode();
-        int64_t const frame_diff =
-            static_cast<int64_t>(rt_tc.to_frame_count()) - static_cast<int64_t>(cur_tc.to_frame_count());
+        int64_t const frame_diff = static_cast<int64_t>(rt_tc.to_frame_count()) - static_cast<int64_t>(cur_tc.to_frame_count());
         if ((frame_diff < 0 ? -frame_diff : frame_diff) >= 2) {
             state.servo->set_timecode(rt_tc, current_epoch);
         }

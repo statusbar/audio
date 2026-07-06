@@ -16,10 +16,7 @@ using namespace statusbar;
 
 extern "C" int LLVMFuzzerTestOneInput(uint8_t const* data, size_t size)
 {
-    midi::MidiParser<256> parser(
-        [](midi::MidiMessage const&) {},
-        [](midi::SysexMessage<256> const&) {},
-        [](midi::MidiError) {});
+    midi::MidiParser<256> parser([](midi::MidiMessage const&) {}, [](midi::SysexMessage<256> const&) {}, [](midi::MidiError) {});
 
     for (size_t i = 0; i < size; ++i) {
         parser.parse(data[i]);
