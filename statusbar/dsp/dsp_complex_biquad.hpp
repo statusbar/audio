@@ -22,6 +22,34 @@ struct ComplexFirstOrderCoeffs
     T a0_re{}, a0_im{};  ///< Feedforward a0: real, imaginary
     T a1_re{}, a1_im{};  ///< Feedforward a1 (z^-1 term): real, imaginary
     T b1_re{}, b1_im{};  ///< Feedback b1 (z^-1 term): real, imaginary
+
+    /// Evaluate the section's transfer function H(z) in the z-domain
+    ///
+    /// Computes H(z) = (a0 + a1*z^-1) / (1 + b1*z^-1) with complex a0/a1/b1
+    /// for one channel, so the section's magnitude and phase response can be
+    /// plotted at any frequency.
+    ///
+    /// @tparam ComplexType Complex number type (e.g., std::complex<double>)
+    /// @param z1 The z^-1 value; for frequency response use z^-1 = e^(-jω)
+    ///           where ω = 2πf/fs (normalized angular frequency)
+    /// @param channel Channel index for multi-channel (SIMD) filters
+    /// @return Complex frequency response H(z) at the given z value
+    template <typename ComplexType>
+    auto process_z_domain(ComplexType const z1, size_t const channel = 0) const -> ComplexType
+    {
+        using value_type = typename ComplexType::value_type;
+        ComplexType const c_a0(
+            static_cast<value_type>(get_flattened_item(a0_re, channel)),
+            static_cast<value_type>(get_flattened_item(a0_im, channel)));
+        ComplexType const c_a1(
+            static_cast<value_type>(get_flattened_item(a1_re, channel)),
+            static_cast<value_type>(get_flattened_item(a1_im, channel)));
+        ComplexType const c_b1(
+            static_cast<value_type>(get_flattened_item(b1_re, channel)),
+            static_cast<value_type>(get_flattened_item(b1_im, channel)));
+        ComplexType const one(1.0, 0.0);
+        return (c_a0 + (c_a1 * z1)) / (one + (c_b1 * z1));
+    }
 };
 
 /// State for a single complex first-order section.
@@ -246,6 +274,26 @@ struct ComplexBiQuad
         {
             auto const c = design_highshelf(params);
             set_from_biquad_coeffs(c.a0, c.a1, c.a2, c.b1, c.b2, params.channel);
+        }
+
+        /// Evaluate the full filter's transfer function H(z) in the z-domain
+        ///
+        /// The cascade's response is the product of its two first-order
+        /// sections: H(z) = H1(z) * H2(z). For coefficients produced by
+        /// set_from_biquad_coeffs this equals the source biquad's
+        /// H(z) = (a0 + a1*z^-1 + a2*z^-2) / (1 + b1*z^-1 + b2*z^-2), so the
+        /// expected magnitude and phase response can be plotted exactly as
+        /// with BiQuad::Coeffs::process_z_domain.
+        ///
+        /// @tparam ComplexType Complex number type (e.g., std::complex<double>)
+        /// @param z1 The z^-1 value; for frequency response use z^-1 = e^(-jω)
+        ///           where ω = 2πf/fs (normalized angular frequency)
+        /// @param channel Channel index for multi-channel (SIMD) filters
+        /// @return Complex frequency response H(z) at the given z value
+        template <typename ComplexType>
+        auto process_z_domain(ComplexType const z1, size_t const channel = 0) const -> ComplexType
+        {
+            return stage1.process_z_domain(z1, channel) * stage2.process_z_domain(z1, channel);
         }
     };
 

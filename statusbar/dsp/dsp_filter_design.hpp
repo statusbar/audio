@@ -36,6 +36,32 @@ struct FilterParams
 struct BiquadCoeffsF64
 {
     double a0, a1, a2, b1, b2;
+
+    /// Evaluate the transfer function H(z) in the z-domain
+    ///
+    /// Computes H(z) = (a0 + a1*z^-1 + a2*z^-2) / (1 + b1*z^-1 + b2*z^-2),
+    /// so the expected magnitude and phase response of a designed filter can
+    /// be plotted straight from the design result, before (or without)
+    /// loading it into a runtime filter.
+    ///
+    /// @tparam ComplexType Complex number type (e.g., std::complex<double>)
+    /// @param z1 The z^-1 value; for frequency response use z^-1 = e^(-jω)
+    ///           where ω = 2πf/fs (normalized angular frequency)
+    /// @param channel Unused (coefficients are scalar); present so generic
+    ///                code can evaluate any Coeffs type uniformly
+    /// @return Complex frequency response H(z) at the given z value
+    template <typename ComplexType>
+    auto process_z_domain(ComplexType const z1, size_t const channel = 0) const -> ComplexType
+    {
+        (void)channel;
+        using value_type = typename ComplexType::value_type;
+        ComplexType const one(1.0, 0.0);
+        ComplexType const z2 = z1 * z1;
+        ComplexType const numerator =
+            static_cast<value_type>(a0) + (static_cast<value_type>(a1) * z1) + (static_cast<value_type>(a2) * z2);
+        ComplexType const denominator = one + (static_cast<value_type>(b1) * z1) + (static_cast<value_type>(b2) * z2);
+        return numerator / denominator;
+    }
 };
 
 // ---------------------------------------------------------------------------

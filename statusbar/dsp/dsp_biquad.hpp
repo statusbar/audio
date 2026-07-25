@@ -126,7 +126,7 @@ struct BiQuad
         /// double magnitude_db = 20.0 * std::log10(magnitude); // ~-3 dB
         /// @endcode
         template <typename ComplexType>
-        auto process_z_domain(ComplexType const z1, size_t const channel = 0) -> ComplexType
+        auto process_z_domain(ComplexType const z1, size_t const channel = 0) const -> ComplexType
         {
             ComplexType const one(1.0, 0.0);
             ComplexType const z2 = z1 * z1;
