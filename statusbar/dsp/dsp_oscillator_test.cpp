@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cmath>
+#include <complex>
 #include <numbers>
 #include <span>
 #include <vector>
@@ -560,6 +561,29 @@ TEST(osc_simd, process_sample)
         }
     }
     EXPECT_TRUE(has_output);
+}
+
+TEST(oscillator_z_domain, input_path_is_unity)
+{
+    // The oscillator adds its tone to an unmodified pass-through of the
+    // input, so its chain contribution is identity at every frequency and
+    // amplitude setting.
+    Oscillator<double>::Coeffs coeffs{};
+    coeffs.set_amplitude(0.5, 0);
+
+    for (double omega : {0.01, 0.3, 1.0, 3.0}) {
+        auto const z1 = std::complex<double>(std::cos(-omega), std::sin(-omega));
+        auto const response = coeffs.process_z_domain(z1);
+        EXPECT_TRUE(std::abs(response - std::complex<double>(1.0, 0.0)) < 1e-12);
+    }
+}
+
+TEST(oscillator_z_domain, simd_compiles)
+{
+    Oscillator<simd_float32x4>::Coeffs coeffs{};
+    auto const z1 = std::complex<float>(std::cos(-0.3F), std::sin(-0.3F));
+    auto const response = coeffs.process_z_domain(z1, 2);
+    EXPECT_TRUE(std::abs(response - std::complex<float>(1.0F, 0.0F)) < 1e-6F);
 }
 
 // Main test runner function required bycreate_test_sourcelist =====

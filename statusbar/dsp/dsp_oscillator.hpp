@@ -85,6 +85,25 @@ struct Oscillator
         T amplitude_{};
 
         void set_amplitude(item_type const& v, size_t channel) noexcept { set_flattened_item(amplitude_, v, channel); }
+
+        /// Evaluate the oscillator's transfer function H(z) for the input path
+        ///
+        /// The oscillator adds its generated tone to an otherwise unmodified
+        /// input (out = tone * amplitude + in), so the input signal passes
+        /// through with H(z) = 1: an oscillator stage contributes flat
+        /// magnitude and zero phase to a processing chain's plotted response.
+        ///
+        /// @tparam ComplexType Complex number type (e.g., std::complex<double>)
+        /// @param z1 The z^-1 value (unused; the pass-through is frequency-independent)
+        /// @param channel Channel index for multi-channel (SIMD) filters (unused)
+        /// @return Unity: ComplexType(1, 0)
+        template <typename ComplexType>
+        auto process_z_domain(ComplexType z1, size_t channel = 0) const -> ComplexType
+        {
+            (void)z1;
+            (void)channel;
+            return ComplexType(1.0, 0.0);
+        }
     };
 
     struct State

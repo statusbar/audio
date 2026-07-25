@@ -1158,5 +1158,34 @@ TEST(biquad_edge, different_sample_rates)
     EXPECT_NE(filter_48k.coeffs.b1, filter_96k.coeffs.b1);
 }
 
+TEST(biquad_design, coeffs_f64_process_z_domain_matches_filter)
+{
+    // BiquadCoeffsF64 can be plotted straight from the design result; its
+    // response must equal a runtime BiQuad loaded with the same coefficients.
+    constexpr double sample_rate = 48000.0;
+    auto const design = design_lowpass({.sample_rate_recip = 1.0 / sample_rate, .frequency = 1000.0, .q = 0.707});
+
+    BiQuad<double> filter;
+    filter.coeffs.set(design.a0, design.a1, design.a2, design.b1, design.b2);
+
+    for (double freq : {100.0, 1000.0, 10000.0}) {
+        auto const z1 = z_inv_for_freq(freq, sample_rate);
+        auto const from_design = design.process_z_domain(z1);
+        auto const from_filter = filter.coeffs.process_z_domain(z1);
+        EXPECT_TRUE(std::abs(from_design - from_filter) < 1e-12);
+    }
+}
+
+TEST(biquad_design, coeffs_f64_lowpass_minus_3db_at_cutoff)
+{
+    constexpr double sample_rate = 48000.0;
+    constexpr double cutoff = 1000.0;
+    auto const design = design_lowpass({.sample_rate_recip = 1.0 / sample_rate, .frequency = cutoff, .q = 0.707});
+
+    auto const response = design.process_z_domain(z_inv_for_freq(cutoff, sample_rate));
+    double const magnitude_db = 20.0 * std::log10(std::abs(response));
+    EXPECT_TRUE(std::abs(magnitude_db - (-3.0)) < 0.1);
+}
+
 // Main test runner function required bycreate_test_sourcelist =====
 TEST_MAIN(statusbar_dsp, dsp_biquad_test)

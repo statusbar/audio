@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cmath>
+#include <complex>
 #include <numbers>
 
 using namespace statusbar::dsp;
@@ -533,6 +534,103 @@ TEST(cbiquad_precision, f32_complex_vs_f64_standard)
     }
 
     EXPECT_TRUE(max_err < 5e-3);
+}
+
+// ============================================================================
+// Z-domain response
+// ============================================================================
+
+namespace {
+
+auto z_inv_for_freq(double freq, double sample_rate) -> std::complex<double>
+{
+    double const omega = 2.0 * std::numbers::pi * freq / sample_rate;
+    return {std::cos(-omega), std::sin(-omega)};
+}
+
+}  // namespace
+
+TEST(cbiquad_z_domain, matches_standard_biquad_response)
+{
+    // The cascade is a factorization of the standard biquad, so its z-domain
+    // response (product of the two first-order sections) must equal the
+    // standard biquad's response across the band.
+    constexpr double sample_rate = 48000.0;
+    FilterParams<> const params{.sample_rate_recip = 1.0 / sample_rate, .frequency = 1000.0, .q = 0.707};
+
+    BiQuad<double> bq;
+    bq.coeffs.calculate_lowpass(params);
+    ComplexBiQuad<double> cbq;
+    cbq.coeffs.calculate_lowpass(params);
+
+    for (double freq : {20.0, 100.0, 500.0, 1000.0, 2000.0, 10000.0, 20000.0}) {
+        auto const z1 = z_inv_for_freq(freq, sample_rate);
+        auto const expected = bq.coeffs.process_z_domain(z1);
+        auto const actual = cbq.coeffs.process_z_domain(z1);
+        EXPECT_TRUE(std::abs(actual - expected) < 1e-9);
+    }
+}
+
+TEST(cbiquad_z_domain, matches_standard_biquad_response_peak)
+{
+    // Repeat with a peak EQ: complex-conjugate poles AND zeros off the real
+    // axis exercise the complex stage coefficients fully.
+    constexpr double sample_rate = 48000.0;
+    FilterParams<> const params{.sample_rate_recip = 1.0 / sample_rate, .frequency = 2000.0, .q = 2.0, .gain_db = 6.0};
+
+    BiQuad<double> bq;
+    bq.coeffs.calculate_peak(params);
+    ComplexBiQuad<double> cbq;
+    cbq.coeffs.calculate_peak(params);
+
+    for (double freq : {100.0, 1000.0, 2000.0, 4000.0, 16000.0}) {
+        auto const z1 = z_inv_for_freq(freq, sample_rate);
+        auto const expected = bq.coeffs.process_z_domain(z1);
+        auto const actual = cbq.coeffs.process_z_domain(z1);
+        EXPECT_TRUE(std::abs(actual - expected) < 1e-9);
+    }
+}
+
+TEST(cbiquad_z_domain, lowpass_minus_3db_at_cutoff)
+{
+    constexpr double sample_rate = 48000.0;
+    constexpr double cutoff = 1000.0;
+
+    ComplexBiQuad<double> cbq;
+    cbq.coeffs.calculate_lowpass({.sample_rate_recip = 1.0 / sample_rate, .frequency = cutoff, .q = 0.707});
+
+    auto const response = cbq.coeffs.process_z_domain(z_inv_for_freq(cutoff, sample_rate));
+    double const magnitude_db = 20.0 * std::log10(std::abs(response));
+    EXPECT_TRUE(std::abs(magnitude_db - (-3.0)) < 0.1);
+}
+
+TEST(cbiquad_z_domain, bypass_unity_response)
+{
+    constexpr double sample_rate = 48000.0;
+
+    ComplexBiQuad<double> cbq;
+    cbq.coeffs.set_bypass();
+
+    for (double freq : {100.0, 1000.0, 10000.0, 20000.0}) {
+        auto const response = cbq.coeffs.process_z_domain(z_inv_for_freq(freq, sample_rate));
+        EXPECT_TRUE(std::abs(std::abs(response) - 1.0) < 1e-10);
+        EXPECT_TRUE(std::abs(std::arg(response)) < 1e-10);
+    }
+}
+
+TEST(cbiquad_z_domain, simd_process_z_domain_compiles_and_matches)
+{
+    // process_z_domain must instantiate for a SIMD T; each channel's response
+    // is an independent scalar.
+    ComplexBiQuad<simd_float32x4> cbq;
+    cbq.coeffs.set_bypass(0);
+    cbq.coeffs.calculate_lowpass({.sample_rate_recip = 1.0 / 48000.0, .frequency = 1000.0, .q = 0.707, .channel = 2});
+
+    auto const z1 = std::complex<float>(std::cos(-0.3F), std::sin(-0.3F));
+    auto const r0 = cbq.coeffs.process_z_domain(z1, 0);
+    auto const r2 = cbq.coeffs.process_z_domain(z1, 2);
+    EXPECT_TRUE(std::abs(std::abs(r0) - 1.0F) < 1e-5F);
+    EXPECT_TRUE(std::abs(r2) < 1.0F);  // lowpass attenuates above cutoff (0.3 rad ≈ 2.3 kHz)
 }
 
 // Main test runner function required by create_test_sourcelist
