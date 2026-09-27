@@ -150,11 +150,15 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
   set(CPACK_RPM_DEVEL_PACKAGE_NAME "statusbar-audio-devel")
   # -dev pulls its own runtime so its cmake config's IMPORTED targets resolve.
   # >= (not =) so an auto-incremented Debian revision (1.3.0-<rev>) still
-  # satisfies the cross-dependencies.
+  # satisfies the cross-dependencies. Floors track the versions this build was
+  # actually made against (find_package sets statusbar-core_VERSION), never a
+  # hardcoded literal that goes stale on the next release.
   set(CPACK_DEBIAN_DEVEL_PACKAGE_DEPENDS
-      "statusbar-audio (>= 1.3.0), statusbar-core-dev (>= 1.3.0)")
+      "statusbar-audio (>= ${PROJECT_VERSION}), statusbar-core-dev (>= ${statusbar-core_VERSION})"
+  )
   set(CPACK_RPM_DEVEL_PACKAGE_REQUIRES
-      "statusbar-audio >= 1.3.0, statusbar-core-devel >= 1.3.0")
+      "statusbar-audio >= ${PROJECT_VERSION}, statusbar-core-devel >= ${statusbar-core_VERSION}"
+  )
   set(CPACK_COMPONENT_DEVEL_DESCRIPTION
       "C++ headers, static libraries and CMake package config")
   set(CPACK_GENERATOR "TGZ;ZIP")
