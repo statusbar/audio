@@ -7,6 +7,7 @@
 #if defined(__linux__)
 
 #    include "statusbar/audio/audio.hpp"
+#    include "statusbar/audio/audio_callback_holder.hpp"
 #    include "statusbar/itc/itc_published.hpp"
 #    include "statusbar/itc/itc_rt_callback_slot.hpp"
 #    include "statusbar/status/catch_or_status.hpp"
@@ -31,95 +32,6 @@
 #    include <alsa/asoundlib.h>
 
 namespace statusbar::audio {
-
-// RT-safe callback ABI: plain function pointer + user context
-using AudioCallbackFn =
-    int (*)(void* user, float const* const* input, float* const* output, uint32_t frames, double stream_time) noexcept;
-
-using AudioCallbackRT = statusbar::itc::RtCallbackSlot<AudioCallbackFn>;
-
-// Adapter to wrap std::function for RT callback
-// Encapsulates the callback function and provides RT-safe access via thunk
-// RAII: automatically clears the AudioCallbackRT on destruction
-class CallbackHolder
-{
-  public:
-    // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved) - moved in initializer list
-    explicit CallbackHolder(
-        AudioCallbackFloat&& callback, AudioCallbackRT& rt, uint32_t num_input_channels, uint32_t num_output_channels)
-        : f_(std::move(callback))
-        , rt_(&rt)
-        , input_buffers_{}
-        , output_buffers_{}
-    {
-        // Pre-allocate buffer vectors to avoid allocation in RT callback
-        if (num_input_channels > 0) {
-            input_buffers_.resize(num_input_channels);
-        }
-        if (num_output_channels > 0) {
-            output_buffers_.resize(num_output_channels);
-        }
-
-        rt_->publish(&CallbackHolder::thunk, this);
-    }
-
-    ~CallbackHolder()
-    {
-        if (rt_ != nullptr) {
-            rt_->clear();
-        }
-    }
-
-    // Non-copyable, non-movable (prevent dangling rt_ pointer)
-    CallbackHolder(CallbackHolder const&) = delete;
-    auto operator=(CallbackHolder const&) -> CallbackHolder& = delete;
-    CallbackHolder(CallbackHolder&&) = delete;
-    auto operator=(CallbackHolder&&) -> CallbackHolder& = delete;
-
-  private:
-    AudioCallbackFloat f_;  // inplace_function with V2 signature
-    AudioCallbackRT* rt_;   // Pointer to RT callback struct (cleared on destruction)
-
-    // Scratch storage for building AudioCallbackParams (pre-allocated at stream start)
-    std::vector<InputAudioBufferFloat> input_buffers_;
-    std::vector<OutputAudioBufferFloat> output_buffers_;
-
-    static auto thunk(void* user, float const* const* input, float* const* output, uint32_t frames, double t) noexcept -> int
-    {
-        auto* self = static_cast<CallbackHolder*>(user);
-#    if __cpp_exceptions
-        try {
-#    endif
-            // Build AudioCallbackParams from raw pointers
-            AudioCallbackParamsFloat params{};
-            params.stream_time = t;
-
-            // Setup input buffers if present
-            if (input != nullptr && !self->input_buffers_.empty()) {
-                for (size_t i = 0; i < self->input_buffers_.size(); ++i) {
-                    self->input_buffers_[i].sample = std::span<float const>(input[i], frames);
-                }
-                params.input_buffers = self->input_buffers_;
-            }
-
-            // Setup output buffers if present
-            if (output != nullptr && !self->output_buffers_.empty()) {
-                for (size_t i = 0; i < self->output_buffers_.size(); ++i) {
-                    self->output_buffers_[i].sample = std::span<float>(output[i], frames);
-                }
-                params.output_buffers = self->output_buffers_;
-            }
-
-            // Call user callback and convert Status to int
-            auto result = self->f_(params);
-            return result.has_value() ? 0 : -1;
-#    if __cpp_exceptions
-        } catch (...) {
-            return -1;  // Signal error on exception
-        }
-#    endif
-    }
-};
 
 // RAII wrapper for snd_pcm_t* during initialization
 // Automatically closes the PCM handle on destruction unless released
@@ -1068,7 +980,9 @@ struct OutputStreamLinux::Impl : StreamImplLinuxBase
         xrun_count.store(0, std::memory_order_relaxed);
         last_error.store(AudioError::None, std::memory_order_release);
 
-        holder = std::make_unique<CallbackHolder>(std::move(callback), cb_rt, 0, config.channels);
+        // The holder of the previous run goes first: its destructor clears the
+        // slot, and that clear must land before the new publish, not over it.
+        replace_callback_holder(holder, std::move(callback), cb_rt, 0, config.channels);
 
         running.store(true, std::memory_order_release);
         audio_thread = std::thread([this]() {
@@ -1496,7 +1410,9 @@ struct InputStreamLinux::Impl : StreamImplLinuxBase
         xrun_count.store(0, std::memory_order_relaxed);
         last_error.store(AudioError::None, std::memory_order_release);
 
-        holder = std::make_unique<CallbackHolder>(std::move(callback), cb_rt, config.channels, 0);
+        // The holder of the previous run goes first: its destructor clears the
+        // slot, and that clear must land before the new publish, not over it.
+        replace_callback_holder(holder, std::move(callback), cb_rt, config.channels, 0);
 
         running.store(true, std::memory_order_release);
         audio_thread = std::thread([this]() {

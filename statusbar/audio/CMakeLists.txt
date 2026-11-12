@@ -27,6 +27,7 @@ statusbar_add_module(
   statusbar::status
   statusbar::itc
   TESTS
+  audio_callback_holder_test.cpp
   audio_config_test.cpp
   audio_convert_test.cpp
   audio_mock_test.cpp
