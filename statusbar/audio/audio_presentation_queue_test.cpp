@@ -643,4 +643,172 @@ TEST(presentation_queue_read_result, read_drains_slot_so_next_write_succeeds)
 }
 
 // Test runner
+// Stale-producer interleavings, replayed deterministically on one thread.
+//
+// A producer loads center, the consumer advances it and drains, and the
+// producer's write lands afterwards: the sample sits in the slot that the time
+// one window later maps to. Nothing in a single-threaded call sequence can
+// interleave inside write(), so the fixture replays the two halves of the race
+// through the protected primitives write() itself is built from.
+namespace {
+
+class RacingQueue : public AudioPresentationQueue<float>
+{
+  public:
+    RacingQueue(size_t channels, size_t capacity)
+        : AudioPresentationQueue<float>(channels, capacity)
+    {}
+
+    /// write_sample() as a producer that loaded @p center_view before the
+    /// consumer advanced center: the acquire + re-check path.
+    auto write_sample_seen_from(int64_t center_view, int64_t time, float value) -> bool
+    {
+        auto const idx = acquire_slot_for_write(time, center_view);
+        if (!idx.has_value()) {
+            return false;
+        }
+        channel_data_[0][*idx] = value;
+        commit_write(*idx, time);
+        return true;
+    }
+
+    /// A write for @p time that landed Full after the consumer passed the
+    /// slot (it was Busy when the consumer looked): the re-check cannot help
+    /// here, the slot time must.
+    auto plant_landed_write(int64_t time, float value) -> bool
+    {
+        size_t const idx = time_to_index(time);
+        if (!try_acquire_for_write(idx, time)) {
+            return false;
+        }
+        channel_data_[0][idx] = value;
+        commit_write(idx, time);
+        return true;
+    }
+};
+
+auto read_frames(AudioPresentationQueue<float>& queue, size_t frames, std::vector<float>& out)
+    -> AudioPresentationQueue<float>::ReadResult
+{
+    out.assign(frames, -1.0F);
+    std::array<OutputAudioBufferFloat, 1> dst{OutputAudioBufferFloat{std::span<float>(out)}};
+    return queue.read(dst);
+}
+
+}  // namespace
+
+TEST(presentation_queue_stale_producer, a_write_behind_the_advanced_center_is_dropped)
+{
+    RacingQueue queue(1, 8);
+    std::vector<float> out;
+
+    // Consumer reads 4 frames: center 0 -> 4. The producer still believes 0
+    // and writes time 1, whose slot the consumer has already drained.
+    (void)read_frames(queue, 4, out);
+    EXPECT_EQ(queue.center_time(), 4);
+    EXPECT_FALSE(queue.write_sample_seen_from(0, 1, 0.5F));
+
+    // Time 9 shares slot 1. One window later it must read as silence, not 0.5.
+    (void)read_frames(queue, 4, out);                // center 8
+    auto const result = read_frames(queue, 4, out);  // times 8..11
+    EXPECT_EQ(result.frames_with_data, 0);
+    EXPECT_EQ(result.frames_stale, 0);
+    EXPECT_EQ(out[1], 0.0F);
+}
+
+TEST(presentation_queue_stale_producer, a_landed_stale_sample_reads_as_silence_one_window_later)
+{
+    RacingQueue queue(1, 8);
+    std::vector<float> out;
+
+    (void)read_frames(queue, 4, out);                // center 4
+    EXPECT_TRUE(queue.plant_landed_write(1, 0.7F));  // stale sample for time 1 sits in slot 1
+
+    // Time 9 maps to slot 1: silence, counted as stale, slot drained.
+    (void)read_frames(queue, 4, out);                // center 8
+    auto const result = read_frames(queue, 4, out);  // times 8..11
+    EXPECT_EQ(result.frames_with_data, 0);
+    EXPECT_EQ(result.frames_stale, 1);
+    EXPECT_EQ(out[1], 0.0F);
+
+    // And a real write for time 17 (slot 1 again) goes through and reads back.
+    EXPECT_TRUE(queue.write_sample(17, 0, 0.3F));
+    (void)read_frames(queue, 4, out);              // center 16
+    auto const next = read_frames(queue, 4, out);  // times 16..19
+    EXPECT_EQ(next.frames_with_data, 1);
+    EXPECT_EQ(next.frames_stale, 0);
+    EXPECT_EQ(out[1], 0.3F);
+}
+
+TEST(presentation_queue_stale_producer, peek_and_read_sample_see_through_a_stale_slot)
+{
+    RacingQueue queue(1, 8);
+    std::vector<float> out;
+    (void)read_frames(queue, 8, out);                // center 8
+    EXPECT_TRUE(queue.plant_landed_write(1, 0.7F));  // slot 1, stale for time 9
+
+    EXPECT_EQ(queue.read_sample(9, 0), 0.0F);  // drains it
+    EXPECT_TRUE(queue.plant_landed_write(1, 0.7F));
+    out.assign(8, -1.0F);
+    std::array<OutputAudioBufferFloat, 1> dst{OutputAudioBufferFloat{std::span<float>(out)}};
+    auto const peeked = queue.peek(dst);
+    EXPECT_EQ(peeked.frames_stale, 1);
+    EXPECT_EQ(peeked.frames_with_data, 0);
+    EXPECT_EQ(out[1], 0.0F);
+}
+
+TEST(presentation_queue_stale_producer, the_later_time_takes_a_stale_full_slot_over)
+{
+    RacingQueue queue(1, 8);
+    std::vector<float> out;
+    (void)read_frames(queue, 4, out);                // center 4
+    EXPECT_TRUE(queue.plant_landed_write(1, 0.7F));  // slot 1 Full for time 1
+
+    // The real sample for time 9 is not dropped on the Full slot: it replaces
+    // the stale one. A second write for time 9 is the usual duplicate drop.
+    EXPECT_TRUE(queue.write_sample(9, 0, 0.3F));
+    EXPECT_FALSE(queue.write_sample(9, 0, 0.9F));
+    EXPECT_EQ(queue.read_sample(9, 0), 0.3F);
+}
+
+TEST(presentation_queue_stale_producer, a_stale_producer_never_takes_a_newer_sample)
+{
+    RacingQueue queue(1, 8);
+    std::vector<float> out;
+    (void)read_frames(queue, 4, out);             // center 4
+    EXPECT_TRUE(queue.write_sample(9, 0, 0.3F));  // real sample for time 9 in slot 1
+
+    // A producer with center 0 in hand writes time 1: slot 1 is Full for a
+    // LATER time, so it is not taken over, and the real sample survives.
+    EXPECT_FALSE(queue.write_sample_seen_from(0, 1, 0.5F));
+    EXPECT_EQ(queue.read_sample(9, 0), 0.3F);
+    (void)read_frames(queue, 4, out);  // center 8
+    auto const result = read_frames(queue, 4, out);
+    EXPECT_EQ(result.frames_with_data, 1);
+    EXPECT_EQ(out[1], 0.3F);
+}
+
+TEST(presentation_queue_stale_producer, multichannel_write_has_the_same_guard)
+{
+    RacingQueue queue(2, 8);
+    std::vector<float> out;
+    (void)read_frames(queue, 4, out);  // center 4
+
+    // A two-channel write for times 2..5 with center 0 in hand: 2 and 3 are
+    // behind the advanced center and are dropped, 4 and 5 land.
+    std::array<float, 4> const ch0{1.0F, 2.0F, 3.0F, 4.0F};
+    std::array<float, 4> const ch1{5.0F, 6.0F, 7.0F, 8.0F};
+    std::array<InputAudioBufferFloat, 2> src{
+        InputAudioBufferFloat{std::span<float const>(ch0)}, InputAudioBufferFloat{std::span<float const>(ch1)}};
+    EXPECT_EQ(queue.write(2, src), 2);
+    EXPECT_EQ(queue.read_sample(4, 0), 3.0F);
+    EXPECT_EQ(queue.read_sample(5, 1), 8.0F);
+
+    // Times 10 and 11 share the slots of 2 and 3: nothing stale there.
+    (void)read_frames(queue, 4, out);  // center 8
+    auto const result = read_frames(queue, 4, out);
+    EXPECT_EQ(result.frames_stale, 0);
+    EXPECT_EQ(result.frames_with_data, 0);
+}
+
 TEST_MAIN(statusbar_audio, audio_presentation_queue_test)

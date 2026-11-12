@@ -12,8 +12,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <memory_resource>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -98,8 +100,11 @@ class AudioPresentationQueueBase
     /// @param time Presentation time to check
     [[nodiscard]] auto is_time_in_range(int64_t time) const noexcept -> bool;
 
-    /// CAS Empty -> Busy. Returns true if the caller now owns the slot for writing.
-    [[nodiscard]] auto try_acquire_for_write(size_t idx) noexcept -> bool;
+    /// Producer: CAS Empty -> Busy, or Full -> Busy when the slot holds a
+    /// sample for an EARLIER time than @p time (a stale write the consumer
+    /// has not drained). Returns true if the caller now owns the slot for
+    /// writing. A Full slot for the same or a later time is never taken.
+    [[nodiscard]] auto try_acquire_for_write(size_t idx, int64_t time) noexcept -> bool;
     /// CAS Full -> Busy. Returns Acquired / WasEmpty / WasBusy.
     [[nodiscard]] auto try_acquire_for_read(size_t idx) noexcept -> ReadAcquireOutcome;
     /// Release after write: Busy -> Full (release).
@@ -116,12 +121,24 @@ class AudioPresentationQueueBase
     /// Relaxed load of a single slot's state. For peek/read_sample diagnostics.
     [[nodiscard]] auto load_slot_state_relaxed(size_t idx) const noexcept -> SlotState;
 
+    /// The presentation time of the sample a slot holds (never_written_time
+    /// when none). Written by the Busy owner before release_after_write and
+    /// read by the owner after a successful acquire; the slot state's
+    /// release/acquire carries it across threads.
+    [[nodiscard]] auto slot_time(size_t idx) const noexcept -> int64_t;
+    /// Record the presentation time of the sample being written to a slot.
+    void set_slot_time(size_t idx, int64_t time) noexcept;
+
+    /// slot_time() of a slot nothing has been written to.
+    static constexpr int64_t never_written_time = std::numeric_limits<int64_t>::min();
+
     size_t capacity_{0};
     size_t channels_{0};
 
   private:
     std::atomic<int64_t> center_time_{0};
     std::unique_ptr<std::atomic<uint8_t>[]> slot_states_{};
+    std::unique_ptr<std::atomic<int64_t>[]> slot_times_{};
 };
 
 /// Lock-free SPSC audio queue with presentation-time indexed random access.
@@ -134,13 +151,24 @@ class AudioPresentationQueueBase
 /// - read()/peek()/advance() must be called from a single consumer thread.
 /// - center_time() and time-range queries are safe from either thread.
 ///
-/// Each slot carries a single-byte SlotState atomic (Empty/Busy/Full). Producer
-/// and consumer both CAS Empty<->Busy / Full<->Busy before touching slot data,
-/// and skip on CAS failure. Read advances center_time *before* draining slots
-/// so a steady-state producer (with fresher acquire load of center) writes only
-/// outside the read window. The CAS flag protects against an in-flight producer
-/// that already loaded the old center, eliminating torn reads/writes for any T
-/// including SIMD vector types.
+/// Each slot carries a single-byte SlotState atomic (Empty/Busy/Full) and the
+/// presentation time of the sample it holds. Producer and consumer both CAS
+/// Empty<->Busy / Full<->Busy before touching slot data, and skip on CAS
+/// failure. Read advances center_time *before* draining slots so a
+/// steady-state producer (with fresher acquire load of center) writes only
+/// outside the read window. The CAS flag protects against an in-flight
+/// producer that already loaded the old center, eliminating torn reads/writes
+/// for any T including SIMD vector types.
+///
+/// A producer that loaded center before the consumer advanced it may still
+/// land a sample for a time the consumer has passed: into a slot the consumer
+/// has already drained, or into one it skipped as Busy. Such a sample sits in
+/// the slot the time one window later maps to. The slot time catches it: the
+/// producer re-checks center after taking the slot and gives it back if its
+/// time has fallen behind; the consumer treats a slot whose time is not the
+/// one it is reading as never written (ReadResult::frames_stale); and a
+/// producer writing the later time takes a Full slot over when the time it
+/// holds is earlier than its own.
 ///
 /// On contention, drops are by-design — both sides skip the slot. This matches
 /// real-time audio semantics where a producer running behind its presentation
@@ -150,15 +178,18 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
 {
   public:
     /// Outcome of read()/peek(): how many of the requested frames were drained,
-    /// how many carried real producer-written data, and how many were dropped
-    /// because the producer was concurrently writing the slot.
-    /// frames_read - frames_with_data - frames_dropped_racing == frames that
-    /// were never written.
+    /// how many carried real producer-written data, how many were dropped
+    /// because the producer was concurrently writing the slot, and how many
+    /// held a sample for an earlier time (a producer with a stale view of
+    /// center) and so read as silence.
+    /// frames_read - frames_with_data - frames_dropped_racing - frames_stale
+    /// == frames that were never written.
     struct ReadResult
     {
         size_t frames_read{0};
         size_t frames_with_data{0};
         size_t frames_dropped_racing{0};
+        size_t frames_stale{0};
     };
 
     /// Construct a presentation queue.
@@ -168,8 +199,8 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
     ///        buffers. nullptr is treated as std::pmr::get_default_resource().
     AudioPresentationQueue(size_t channels, size_t capacity, std::pmr::memory_resource* memory_resource = nullptr)
         : AudioPresentationQueueBase(channels, capacity)
-        , mem_resource_{memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource()}
-        , channel_data_{mem_resource_}
+        , channel_data_{memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource()}
+        , mem_resource_{channel_data_.get_allocator().resource()}
     {
         channel_data_.resize(channels, std::pmr::vector<T>{mem_resource_});
         for (auto& ch : channel_data_) {
@@ -181,8 +212,8 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
     /// Default constructor (must call init() before use). Uses
     /// std::pmr::get_default_resource() for the per-channel buffers.
     AudioPresentationQueue()
-        : mem_resource_{std::pmr::get_default_resource()}
-        , channel_data_{mem_resource_}
+        : channel_data_{std::pmr::get_default_resource()}
+        , mem_resource_{channel_data_.get_allocator().resource()}
     {}
 
     /// Initialize or reinitialize the queue
@@ -210,35 +241,23 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
     ///         and frames lost to a concurrent consumer holding the slot).
     auto write(int64_t const start_time, std::span<InputAudioBuffer<T> const> const src) noexcept -> size_t
     {
-        if (src.empty() || src[0].sample.empty()) {
-            return 0;
-        }
-
-        int64_t center = load_center_time_acquire();
-        size_t frames = src[0].sample.size();
-        size_t num_channels = (src.size() < channels_) ? src.size() : channels_;
+        int64_t const center = load_center_time_acquire();
+        size_t const frames = src.empty() ? 0 : src[0].sample.size();
+        size_t const num_channels = (src.size() < channels_) ? src.size() : channels_;
         size_t written = 0;
 
         for (size_t i = 0; i < frames; ++i) {
-            int64_t t = start_time + static_cast<int64_t>(i);
-
-            // Out-of-range relative to the producer's view of center_time.
-            if (t < center || t >= center + static_cast<int64_t>(capacity_)) {
+            int64_t const t = start_time + static_cast<int64_t>(i);
+            auto const idx = acquire_slot_for_write(t, center);
+            if (!idx.has_value()) {
                 continue;
             }
-
-            size_t idx = time_to_index(t);
-            if (!try_acquire_for_write(idx)) {
-                // Slot is Full (consumer hasn't drained) or Busy (consumer racing). Drop.
-                continue;
-            }
-
             for (size_t c = 0; c < num_channels; ++c) {
                 if (i < src[c].sample.size()) {
-                    channel_data_[c][idx] = src[c].sample[i];
+                    channel_data_[c][*idx] = src[c].sample[i];
                 }
             }
-            release_after_write(idx);
+            commit_write(*idx, t);
             ++written;
         }
         return written;
@@ -258,17 +277,12 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
             return false;
         }
 
-        int64_t center = load_center_time_acquire();
-        if (time < center || time >= center + static_cast<int64_t>(capacity_)) {
+        auto const idx = acquire_slot_for_write(time, load_center_time_acquire());
+        if (!idx.has_value()) {
             return false;
         }
-
-        size_t idx = time_to_index(time);
-        if (!try_acquire_for_write(idx)) {
-            return false;
-        }
-        channel_data_[channel][idx] = value;
-        release_after_write(idx);
+        channel_data_[channel][*idx] = value;
+        commit_write(*idx, time);
         return true;
     }
 
@@ -281,47 +295,19 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
     /// @param dst Span of output channel buffers
     auto read(std::span<OutputAudioBuffer<T> const> const dst) noexcept -> ReadResult
     {
-        if (dst.empty() || dst[0].sample.empty()) {
-            return {};
-        }
-
-        int64_t center = load_center_time_relaxed();
-        size_t frames = dst[0].sample.size();
-        size_t num_channels = (dst.size() < channels_) ? dst.size() : channels_;
+        int64_t const center = load_center_time_relaxed();
+        size_t const frames = dst.empty() ? 0 : dst[0].sample.size();
 
         // Advance center_time *before* draining. Producers that load center
         // after this store see the new value and reject writes to the range
-        // we're about to drain. The slot CAS handles producers in-flight with
-        // the stale center.
+        // we're about to drain. The slot CAS and the slot time handle
+        // producers in-flight with the stale center.
         store_center_time_release(center + static_cast<int64_t>(frames));
 
         ReadResult result{.frames_read = frames};
-
         for (size_t i = 0; i < frames; ++i) {
-            size_t idx = time_to_index(center + static_cast<int64_t>(i));
-            switch (try_acquire_for_read(idx)) {
-                case ReadAcquireOutcome::Acquired:
-                    for (size_t c = 0; c < num_channels; ++c) {
-                        dst[c].sample[i] = channel_data_[c][idx];
-                        zero_sample(channel_data_[c][idx]);
-                    }
-                    release_after_read(idx);
-                    ++result.frames_with_data;
-                    break;
-                case ReadAcquireOutcome::WasBusy:
-                    ++result.frames_dropped_racing;
-                    for (size_t c = 0; c < num_channels; ++c) {
-                        zero_sample(dst[c].sample[i]);
-                    }
-                    break;
-                case ReadAcquireOutcome::WasEmpty:
-                    for (size_t c = 0; c < num_channels; ++c) {
-                        zero_sample(dst[c].sample[i]);
-                    }
-                    break;
-            }
+            take_frame(center + static_cast<int64_t>(i), i, dst, result, true);
         }
-
         return result;
     }
 
@@ -333,40 +319,12 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
     /// @param dst Span of output channel buffers
     auto peek(std::span<OutputAudioBuffer<T> const> const dst) noexcept -> ReadResult
     {
-        if (dst.empty() || dst[0].sample.empty()) {
-            return {};
-        }
-
-        int64_t center = load_center_time_acquire();
-        size_t frames = dst[0].sample.size();
-        size_t num_channels = (dst.size() < channels_) ? dst.size() : channels_;
-
+        int64_t const center = load_center_time_acquire();
+        size_t const frames = dst.empty() ? 0 : dst[0].sample.size();
         ReadResult result{.frames_read = frames};
-
         for (size_t i = 0; i < frames; ++i) {
-            size_t idx = time_to_index(center + static_cast<int64_t>(i));
-            switch (try_acquire_for_read(idx)) {
-                case ReadAcquireOutcome::Acquired:
-                    for (size_t c = 0; c < num_channels; ++c) {
-                        dst[c].sample[i] = channel_data_[c][idx];
-                    }
-                    release_after_peek(idx);
-                    ++result.frames_with_data;
-                    break;
-                case ReadAcquireOutcome::WasBusy:
-                    ++result.frames_dropped_racing;
-                    for (size_t c = 0; c < num_channels; ++c) {
-                        zero_sample(dst[c].sample[i]);
-                    }
-                    break;
-                case ReadAcquireOutcome::WasEmpty:
-                    for (size_t c = 0; c < num_channels; ++c) {
-                        zero_sample(dst[c].sample[i]);
-                    }
-                    break;
-            }
+            take_frame(center + static_cast<int64_t>(i), i, dst, result, false);
         }
-
         return result;
     }
 
@@ -379,22 +337,14 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
     /// @return Sample value (zero if not written, out of range, or contended)
     [[nodiscard]] auto read_sample(int64_t const time, size_t const channel) noexcept -> T
     {
-        if (channel >= channels_) {
+        if (channel >= channels_ || !is_time_in_range(time)) {
             return T{};
         }
-
-        int64_t center = load_center_time_acquire();
-        if (time < center || time >= center + static_cast<int64_t>(capacity_)) {
-            return T{};
-        }
-
-        size_t idx = time_to_index(time);
+        size_t const idx = time_to_index(time);
         if (try_acquire_for_read(idx) != ReadAcquireOutcome::Acquired) {
             return T{};
         }
-        T const value = channel_data_[channel][idx];
-        release_after_peek(idx);
-        return value;
+        return take_held_sample(idx, time, channel);
     }
 
     // Time advancement
@@ -456,12 +406,113 @@ class AudioPresentationQueue : public AudioPresentationQueueBase
         store_center_time_release(0);
     }
 
+  protected:
+    /// Producer: own the slot for @p time, or nullopt. Out of range against
+    /// @p center (the producer's view) is a drop; so is a slot the consumer
+    /// holds or that holds a sample for the same or a later time. Once the
+    /// slot is held, center is read again: if @p time has fallen behind it
+    /// (the consumer advanced while this write was in flight), the slot is
+    /// given back clean, so the sample never lands in the slot the time one
+    /// window later maps to.
+    /// @param time Presentation time of the frame
+    /// @param center The producer's view of center_time
+    [[nodiscard]] auto acquire_slot_for_write(int64_t time, int64_t center) noexcept -> std::optional<size_t>
+    {
+        if (time < center || time >= center + static_cast<int64_t>(capacity_)) {
+            return std::nullopt;
+        }
+        size_t const idx = time_to_index(time);
+        if (!try_acquire_for_write(idx, time)) {
+            return std::nullopt;
+        }
+        if (time < load_center_time_acquire()) {
+            drain_stale_slot(idx);
+            return std::nullopt;
+        }
+        return idx;
+    }
+
+    /// Producer: publish the frame written to @p idx as the sample for @p time.
+    void commit_write(size_t idx, int64_t time) noexcept
+    {
+        set_slot_time(idx, time);
+        release_after_write(idx);
+    }
+
+    /// Per-channel sample storage; protected so a test can plant a slot.
+    std::pmr::vector<std::pmr::vector<T>> channel_data_;
+
   private:
     /// Zero a sample value (uses zero(T&) from statusbar::dsp for scalars and SIMD types)
     static void zero_sample(T& v) noexcept { zero(v); }
 
+    /// Zero every channel of a slot the caller holds Busy and release it Empty.
+    void drain_stale_slot(size_t idx) noexcept
+    {
+        for (size_t c = 0; c < channels_; ++c) {
+            zero_sample(channel_data_[c][idx]);
+        }
+        release_after_read(idx);
+    }
+
+    /// Value of a held (Busy) slot for @p time on @p channel, handing the slot
+    /// back Full; or T{} after draining it when it holds a sample for another
+    /// time (a producer with a stale view of center wrote it).
+    [[nodiscard]] auto take_held_sample(size_t idx, int64_t time, size_t channel) noexcept -> T
+    {
+        if (slot_time(idx) != time) {
+            drain_stale_slot(idx);
+            return T{};
+        }
+        T const value = channel_data_[channel][idx];
+        release_after_peek(idx);
+        return value;
+    }
+
+    /// Consumer: one frame of read() (@p drain) or peek(). A slot that holds a
+    /// sample for a time other than @p time was written by a producer with a
+    /// stale view of center: it reads as silence and is drained either way.
+    void take_frame(
+        int64_t time, size_t i, std::span<OutputAudioBuffer<T> const> const dst, ReadResult& result, bool drain) noexcept
+    {
+        size_t const num_channels = (dst.size() < channels_) ? dst.size() : channels_;
+        size_t const idx = time_to_index(time);
+        auto const outcome = try_acquire_for_read(idx);
+        if (outcome == ReadAcquireOutcome::Acquired && slot_time(idx) == time) {
+            copy_frame_out(idx, i, dst, num_channels, drain);
+            ++result.frames_with_data;
+            return;
+        }
+        for (size_t c = 0; c < num_channels; ++c) {
+            zero_sample(dst[c].sample[i]);
+        }
+        if (outcome == ReadAcquireOutcome::Acquired) {
+            drain_stale_slot(idx);
+            ++result.frames_stale;
+        } else if (outcome == ReadAcquireOutcome::WasBusy) {
+            ++result.frames_dropped_racing;
+        }
+    }
+
+    /// Copy a held slot's channels to frame @p i of @p dst, then drain it
+    /// (zero, Empty) or hand it back Full.
+    void copy_frame_out(
+        size_t idx, size_t i, std::span<OutputAudioBuffer<T> const> const dst, size_t num_channels, bool drain) noexcept
+    {
+        for (size_t c = 0; c < num_channels; ++c) {
+            dst[c].sample[i] = channel_data_[c][idx];
+        }
+        if (!drain) {
+            release_after_peek(idx);
+            return;
+        }
+        for (size_t c = 0; c < channels_; ++c) {
+            zero_sample(channel_data_[c][idx]);
+        }
+        release_after_read(idx);
+    }
+
     std::pmr::memory_resource* mem_resource_{std::pmr::get_default_resource()};
-    std::pmr::vector<std::pmr::vector<T>> channel_data_;
 };
 
 }  // namespace statusbar::audio

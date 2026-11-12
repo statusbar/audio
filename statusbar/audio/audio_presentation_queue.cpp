@@ -95,6 +95,10 @@ void AudioPresentationQueueBase::init_slot_states(size_t capacity)
     // make_unique<T[]>(n) value-initialises each element (C++20). For
     // std::atomic<uint8_t> that means zero, which is SlotState::Empty.
     slot_states_ = std::make_unique<std::atomic<uint8_t>[]>(capacity);
+    slot_times_ = std::make_unique<std::atomic<int64_t>[]>(capacity);
+    for (size_t i = 0; i < capacity; ++i) {
+        slot_times_[i].store(never_written_time, std::memory_order_relaxed);
+    }
 }
 
 void AudioPresentationQueueBase::reset_all_slots() noexcept
@@ -104,14 +108,37 @@ void AudioPresentationQueueBase::reset_all_slots() noexcept
     }
     for (size_t i = 0; i < capacity_; ++i) {
         slot_states_[i].store(static_cast<uint8_t>(SlotState::Empty), std::memory_order_relaxed);
+        slot_times_[i].store(never_written_time, std::memory_order_relaxed);
     }
 }
 
-auto AudioPresentationQueueBase::try_acquire_for_write(size_t idx) noexcept -> bool
+auto AudioPresentationQueueBase::try_acquire_for_write(size_t idx, int64_t time) noexcept -> bool
 {
     uint8_t expected = static_cast<uint8_t>(SlotState::Empty);
+    if (slot_states_[idx].compare_exchange_strong(
+            expected, static_cast<uint8_t>(SlotState::Busy), std::memory_order_acquire, std::memory_order_relaxed)) {
+        return true;
+    }
+    // A Full slot holding a sample for an earlier time is a stale write the
+    // consumer never read (it skipped the slot as Busy, or the write landed
+    // after its pass); it may be taken over. A sample for the same or a later
+    // time is real data: never touch it. Only the producer writes slot times,
+    // so its own relaxed read here is current.
+    if (expected != static_cast<uint8_t>(SlotState::Full) || slot_times_[idx].load(std::memory_order_relaxed) >= time) {
+        return false;
+    }
     return slot_states_[idx].compare_exchange_strong(
         expected, static_cast<uint8_t>(SlotState::Busy), std::memory_order_acquire, std::memory_order_relaxed);
+}
+
+auto AudioPresentationQueueBase::slot_time(size_t idx) const noexcept -> int64_t
+{
+    return slot_times_[idx].load(std::memory_order_relaxed);
+}
+
+void AudioPresentationQueueBase::set_slot_time(size_t idx, int64_t time) noexcept
+{
+    slot_times_[idx].store(time, std::memory_order_relaxed);
 }
 
 auto AudioPresentationQueueBase::try_acquire_for_read(size_t idx) noexcept -> ReadAcquireOutcome
