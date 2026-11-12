@@ -108,6 +108,20 @@ auto handle_sysex_event(
     return true;
 }
 
+/// Deliver a channel message once its data bytes are known to be 7-bit. A
+/// data byte with the top bit set is a status byte out of place; consumers
+/// such as MidiMatrix index 128-entry tables by note and controller number.
+auto emit_channel_message(MidiTick abs_time, uint8_t status, uint8_t d1, uint8_t d2, auto const& on_message, auto const& on_error)
+    -> bool
+{
+    if (d1 >= 0x80 || d2 >= 0x80) {
+        on_error(MidiError::unexpected_byte);
+        return false;
+    }
+    on_message(abs_time, MidiMessage(status, d1, d2));
+    return true;
+}
+
 auto handle_channel_message(
     std::span<uint8_t const> data,
     size_t& offset,
@@ -153,8 +167,7 @@ auto handle_channel_message(
             offset += 1;
         }
     }
-    on_message(abs_time, MidiMessage(status, d1, d2));
-    return true;
+    return emit_channel_message(abs_time, status, d1, d2, on_message, on_error);
 }
 
 }  // namespace

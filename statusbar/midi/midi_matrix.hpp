@@ -60,9 +60,13 @@ class MidiMatrix
         }
     }
 
-    /// Get the note-on count for a specific channel and note.
+    /// Get the note-on count for a specific channel and note (0 for a note
+    /// number outside 0-127 or a channel outside 0-15).
     [[nodiscard]] constexpr auto note_count(uint8_t channel, uint8_t note) const -> uint8_t
     {
+        if (channel >= num_channels || note >= num_notes) {
+            return 0;
+        }
         return note_on_count_[channel][note];
     }
 
@@ -102,6 +106,11 @@ class MidiMatrix
   private:
     constexpr auto inc_note_count(uint8_t channel, uint8_t note) -> void
     {
+        // A note number with the top bit set is a malformed message (a status
+        // byte where a data byte belongs); it names no row of the table.
+        if (note >= num_notes) {
+            return;
+        }
         // Saturate the per-note count so a flood of stacked note-ons on one note
         // can't wrap the uint8_t back to 0 and leave it disagreeing with the
         // int channel/total tallies forever.
@@ -115,7 +124,7 @@ class MidiMatrix
 
     constexpr auto dec_note_count(uint8_t channel, uint8_t note) -> void
     {
-        if (note_on_count_[channel][note] > 0) {
+        if (note < num_notes && note_on_count_[channel][note] > 0) {
             --note_on_count_[channel][note];
             --channel_count_[channel];
             --total_count_;

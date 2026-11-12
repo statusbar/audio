@@ -1488,4 +1488,63 @@ TEST(midi_matrix, note_count_saturates_without_desync)
     EXPECT_EQ(matrix.total_count(), 0);
 }
 
+// Type 0 file whose note-on carries 0xFF where its data bytes belong
+static constexpr uint8_t type0_bad_data_bytes[] = {
+    'M',  'T',  'h',  'd',  0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x01, 0x01, 0xE0,  //
+    'M',  'T',  'r',  'k',  0x00, 0x00, 0x00, 0x08,                                      // chunk length = 8
+    0x00, 0x90, 0xFF, 0xFF,                                                              // note-on with status bytes as data
+    0x00, 0xFF, 0x2F, 0x00,                                                              // end-of-track
+};
+
+// Type 0 file whose running-status second note hides 0xFF in the velocity
+static constexpr uint8_t type0_bad_running_status_data[] = {
+    'M',  'T',  'h',  'd',  0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x01, 0x01, 0xE0,  //
+    'M',  'T',  'r',  'k',  0x00, 0x00, 0x00, 0x0B,                                      // chunk length = 11
+    0x00, 0x90, 0x3C, 0x64,                                                              // note-on 60 vel 100
+    0x00, 0x3C, 0xFF,                                                                    // running status: note 60, "velocity" 0xFF
+    0x00, 0xFF, 0x2F, 0x00,                                                              // end-of-track
+};
+
+TEST(midi_file_read, data_bytes_with_the_top_bit_set_are_rejected)
+{
+    int messages = 0;
+    int errors = 0;
+    MidiError last_error{};
+    MidiFileCallbacks cb;
+    cb.on_message = [&](MidiTick, MidiMessage const&) { ++messages; };
+    cb.on_error = [&](MidiError e) {
+        ++errors;
+        last_error = e;
+    };
+
+    (void)read_midi_file(std::span<uint8_t const>(type0_bad_data_bytes), cb);
+    EXPECT_EQ(messages, 0);
+    EXPECT_EQ(errors, 1);
+    EXPECT_TRUE(last_error == MidiError::unexpected_byte);
+
+    messages = 0;
+    errors = 0;
+    (void)read_midi_file(std::span<uint8_t const>(type0_bad_running_status_data), cb);
+    EXPECT_EQ(messages, 1);  // the well-formed first note-on
+    EXPECT_EQ(errors, 1);
+    EXPECT_TRUE(last_error == MidiError::unexpected_byte);
+}
+
+TEST(midi_matrix, note_numbers_above_127_touch_nothing)
+{
+    // A hand-built message with a status byte where the note belongs: the
+    // 128-entry tables must not be indexed by it.
+    MidiMatrix matrix;
+    matrix.process(MidiMessage::note_on(0, 60, 100));
+    matrix.process(MidiMessage(0x90, 0xFF, 0x64));
+    matrix.process(MidiMessage(0x90, 0x80, 0x64));
+    matrix.process(MidiMessage(0x80, 0xFF, 0x00));
+    matrix.process(MidiMessage(0x90, 0xFF, 0x00));
+    EXPECT_EQ(matrix.total_count(), 1);
+    EXPECT_EQ(matrix.channel_count(0), 1);
+    EXPECT_EQ(matrix.note_count(0, 60), uint8_t{1});
+    EXPECT_EQ(matrix.note_count(0, 0xFF), uint8_t{0});
+    EXPECT_EQ(matrix.note_count(16, 60), uint8_t{0});
+}
+
 TEST_MAIN(statusbar_midi, midi_test)
