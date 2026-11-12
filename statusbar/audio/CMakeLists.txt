@@ -32,6 +32,7 @@ statusbar_add_module(
   audio_convert_test.cpp
   audio_mock_test.cpp
   audio_presentation_queue_test.cpp
+  audio_render_thread_test.cpp
   audio_test.cpp
   audio_bw64_writer_test.cpp
   audio_timing_test.cpp)

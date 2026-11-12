@@ -7,6 +7,7 @@
 #if defined(__APPLE__)
 
 #    include "statusbar/audio/audio.hpp"
+#    include "statusbar/audio/audio_render_thread.hpp"
 #    include "statusbar/itc/itc_published.hpp"
 #    include "statusbar/itc/itc_rt_callback_slot.hpp"
 #    include "statusbar/status/throw_or_abort.hpp"
@@ -648,6 +649,7 @@ struct OutputStreamDarwin::Impl
     DeviceInfo device_info;
     std::atomic<bool> running{false};
     std::atomic<uint32_t> in_callback{0};  // Guard: callback is executing
+    RenderThreadMarker render_thread;      // Which thread the callback runs on (stop() from inside it must defer)
     std::atomic<bool> destroying{false};   // Guard: prevent concurrent destroy_unit calls
     bool initialized{false};               // AudioUnit has been initialized
     bool started{false};                   // AudioOutputUnitStart succeeded
@@ -712,7 +714,7 @@ struct OutputStreamDarwin::Impl
     /// Set the render callback for output
     auto set_output_callback() -> OSStatus
     {
-        AURenderCallbackStruct cb{.inputProc = Impl::render_callback, .inputProcRefCon = this};
+        AURenderCallbackStruct cb{.inputProc = Impl::render_entry, .inputProcRefCon = this};
         return AudioUnitSetProperty(audio_unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof(cb));
     }
 
@@ -755,6 +757,20 @@ struct OutputStreamDarwin::Impl
         // Ensure audio is stopped and callback has finished before cleanup
         running.store(false, std::memory_order_release);
         destroy_unit();
+    }
+
+    /// CoreAudio's entry point: remember which thread renders (stop() from
+    /// inside the callback must defer the teardown), then render.
+    static auto render_entry(
+        void* refcon,
+        AudioUnitRenderActionFlags* flags,
+        AudioTimeStamp const* timestamp,
+        UInt32 bus,
+        UInt32 frames,
+        AudioBufferList* io_data) -> OSStatus
+    {
+        static_cast<Impl*>(refcon)->render_thread.mark_current();
+        return render_callback(refcon, flags, timestamp, bus, frames, io_data);
     }
 
     static auto render_callback(
@@ -936,11 +952,13 @@ void OutputStreamDarwin::stop()
         return;  // Already stopped
     }
 
-    // If called from within callback thread, defer destroy to avoid deadlock
-    // (AudioOutputUnitStop deadlocks when called from render thread)
-    if (impl_->in_callback.load(std::memory_order_acquire) > 0) {
-        // Just set running=false (already done above), callback will exit naturally
-        // Actual cleanup happens in destructor
+    // Called from the render thread itself (inside the callback): AudioOutputUnitStop
+    // would deadlock waiting for the caller, so leave running=false (done above),
+    // the callback exits naturally and the destructor does the cleanup. Decided by
+    // thread identity, not by in_callback > 0: another thread stopping while a
+    // callback is in flight must still destroy the unit, and destroy_audio_unit
+    // waits for that callback to return.
+    if (stop_must_defer_teardown(impl_->render_thread)) {
         return;
     }
 
@@ -1017,6 +1035,7 @@ struct InputStreamDarwin::Impl
     DeviceInfo device_info;
     std::atomic<bool> running{false};
     std::atomic<uint32_t> in_callback{0};  // Guard: callback is executing
+    RenderThreadMarker render_thread;      // Which thread the callback runs on (stop() from inside it must defer)
     std::atomic<bool> destroying{false};   // Guard: prevent concurrent destroy_unit calls
     bool initialized{false};               // AudioUnit has been initialized
     bool started{false};                   // AudioOutputUnitStart succeeded
@@ -1094,7 +1113,7 @@ struct InputStreamDarwin::Impl
     /// Set the input callback
     auto set_input_callback() -> OSStatus
     {
-        AURenderCallbackStruct cb{.inputProc = Impl::input_callback, .inputProcRefCon = this};
+        AURenderCallbackStruct cb{.inputProc = Impl::input_entry, .inputProcRefCon = this};
         return AudioUnitSetProperty(
             audio_unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 1, &cb, sizeof(cb));
     }
@@ -1161,6 +1180,20 @@ struct InputStreamDarwin::Impl
         // Ensure audio is stopped and callback has finished before cleanup
         running.store(false, std::memory_order_release);
         destroy_unit();
+    }
+
+    /// CoreAudio's entry point: remember which thread renders (stop() from
+    /// inside the callback must defer the teardown), then handle the input.
+    static auto input_entry(
+        void* refcon,
+        AudioUnitRenderActionFlags* flags,
+        AudioTimeStamp const* timestamp,
+        UInt32 bus,
+        UInt32 frames,
+        AudioBufferList* io_data) -> OSStatus
+    {
+        static_cast<Impl*>(refcon)->render_thread.mark_current();
+        return input_callback(refcon, flags, timestamp, bus, frames, io_data);
     }
 
     static auto input_callback(
@@ -1371,11 +1404,13 @@ void InputStreamDarwin::stop()
         return;  // Already stopped
     }
 
-    // If called from within callback thread, defer destroy to avoid deadlock
-    // (AudioOutputUnitStop deadlocks when called from render thread)
-    if (impl_->in_callback.load(std::memory_order_acquire) > 0) {
-        // Just set running=false (already done above), callback will exit naturally
-        // Actual cleanup happens in destructor
+    // Called from the render thread itself (inside the callback): AudioOutputUnitStop
+    // would deadlock waiting for the caller, so leave running=false (done above),
+    // the callback exits naturally and the destructor does the cleanup. Decided by
+    // thread identity, not by in_callback > 0: another thread stopping while a
+    // callback is in flight must still destroy the unit, and destroy_audio_unit
+    // waits for that callback to return.
+    if (stop_must_defer_teardown(impl_->render_thread)) {
         return;
     }
 
