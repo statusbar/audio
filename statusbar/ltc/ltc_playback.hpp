@@ -49,9 +49,24 @@ struct LocalTimeInfo
     double epoch_seconds;  ///< Time as seconds since epoch (for timing calculations)
 };
 
-/// Get local time information from current system clock
+/// Get local time information from current system clock. Calls localtime_r,
+/// which takes a lock and may allocate: not for the audio thread.
 /// @return LocalTimeInfo containing local time, milliseconds, and epoch seconds
 [[nodiscard]] auto get_local_time_info() noexcept -> LocalTimeInfo;
+
+/// Local time's offset from UTC in seconds (daylight saving included) at the
+/// given instant. Calls localtime_r: for the control thread, which refreshes
+/// ServoPlaybackState::utc_offset_seconds with it.
+/// @param epoch_seconds Instant as seconds since the epoch
+[[nodiscard]] auto utc_offset_seconds_at(double epoch_seconds) noexcept -> int32_t;
+
+/// Local time derived arithmetically from an instant and a UTC offset: no
+/// localtime_r, no lock, no allocation, so the audio thread may call it. Only
+/// the time-of-day fields (tm_hour, tm_min, tm_sec) and millis are filled,
+/// which is what Timecode::from_realtime reads; the date fields stay zero.
+/// @param epoch_seconds Instant as seconds since the epoch
+/// @param utc_offset_seconds Local time's offset from UTC (utc_offset_seconds_at)
+[[nodiscard]] auto local_time_from_epoch(double epoch_seconds, int32_t utc_offset_seconds) noexcept -> LocalTimeInfo;
 
 // Playback State Base Classes
 // Base classes with out-of-line implementations to prevent inlining issues
@@ -109,14 +124,22 @@ struct ServoPlaybackState : public ServoPlaybackStateBase
         , time_offset_seconds(offset)
     {}
 
-    ServoGenerator* servo;                ///< Pointer to servo generator (must outlive this state)
-    std::vector<float> sample_buffer;     ///< Scratch buffer for samples
-    uint64_t total_samples_generated{0};  ///< Total samples generated so far
-    double start_epoch;                   ///< Timestamp when playback started (seconds since epoch)
-    double last_update_epoch{0.0};        ///< Last servo update timestamp (seconds since epoch)
-    uint32_t sample_rate;                 ///< Audio sample rate in Hz
-    FrameRate frame_rate;                 ///< SMPTE frame rate
-    int32_t time_offset_seconds{0};       ///< Time-of-day offset in seconds (0 = no offset)
+    /// Size the scratch buffer for the longest period the stream can deliver.
+    /// Call before start(): the audio callback never grows the buffer, and a
+    /// period longer than this is filled with silence past it (short_periods).
+    /// @param max_period_frames Longest period in frames
+    auto prepare(size_t max_period_frames) -> void { sample_buffer.reserve(max_period_frames); }
+
+    ServoGenerator* servo;                       ///< Pointer to servo generator (must outlive this state)
+    std::vector<float> sample_buffer;            ///< Scratch buffer for samples, sized by prepare()
+    uint64_t total_samples_generated{0};         ///< Total samples generated so far
+    double start_epoch;                          ///< Timestamp when playback started (seconds since epoch)
+    double last_update_epoch{0.0};               ///< Last servo update timestamp (seconds since epoch)
+    uint32_t sample_rate;                        ///< Audio sample rate in Hz
+    FrameRate frame_rate;                        ///< SMPTE frame rate
+    int32_t time_offset_seconds{0};              ///< Time-of-day offset in seconds (0 = no offset)
+    std::atomic<int32_t> utc_offset_seconds{0};  ///< Local time's UTC offset; the control thread refreshes it
+    uint32_t short_periods{0};                   ///< Periods longer than the prepared buffer (audio thread's count)
     // running flag moved to ServoPlaybackStateBase
 };
 
@@ -133,6 +156,15 @@ struct ServoPlaybackState : public ServoPlaybackStateBase
     int32_t millis,
     double current_epoch,
     audio::AudioCallbackParamsFloat const& params) -> Status;
+
+/// Audio-thread form of process_servo_callback: the local time is derived from
+/// @p current_epoch and state.utc_offset_seconds (local_time_from_epoch), so
+/// the callback never calls localtime_r.
+/// @param state Playback state (must remain valid for duration of playback)
+/// @param current_epoch Current time as seconds since epoch (get_realtime_timestamp)
+/// @param params Audio callback parameters from the audio stream
+[[nodiscard]] auto process_servo_callback(
+    ServoPlaybackState& state, double current_epoch, audio::AudioCallbackParamsFloat const& params) -> Status;
 
 // Fixed Timecode Playback State and Callback
 

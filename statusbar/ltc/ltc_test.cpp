@@ -1325,6 +1325,71 @@ TEST(playback, servo_callback_basic)
     EXPECT_EQ(state.total_samples_generated, 256);
 }
 
+TEST(playback, local_time_from_epoch_matches_localtime)
+{
+    // The arithmetic form the audio thread uses agrees with localtime_r for
+    // the same instant, given the offset the control thread published.
+    auto const ti = get_local_time_info();
+    auto const offset = utc_offset_seconds_at(ti.epoch_seconds);
+    auto const derived = local_time_from_epoch(ti.epoch_seconds, offset);
+    EXPECT_EQ(derived.local_time.tm_hour, ti.local_time.tm_hour);
+    EXPECT_EQ(derived.local_time.tm_min, ti.local_time.tm_min);
+    EXPECT_EQ(derived.local_time.tm_sec, ti.local_time.tm_sec);
+    EXPECT_EQ(derived.millis, ti.millis);
+
+    // Fixed points: 1970-01-01 01:02:03.250 UTC with a -8 h offset is 17:02:03 the day before.
+    auto const west = local_time_from_epoch(3723.25, -8 * 3600);
+    EXPECT_EQ(west.local_time.tm_hour, 17);
+    EXPECT_EQ(west.local_time.tm_min, 2);
+    EXPECT_EQ(west.local_time.tm_sec, 3);
+    EXPECT_EQ(west.millis, 250);
+    auto const east = local_time_from_epoch(3723.25, 5 * 3600 + 1800);
+    EXPECT_EQ(east.local_time.tm_hour, 6);
+    EXPECT_EQ(east.local_time.tm_min, 32);
+}
+
+TEST(playback, servo_callback_never_grows_its_buffer)
+{
+    ServoGenerator servo(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);
+    servo.set_timecode(Timecode{.rate = FrameRate::Rate_30_NDF});
+
+    auto const ti = get_local_time_info();
+    ServoPlaybackState state(&servo, 48000, FrameRate::Rate_30_NDF, ti.epoch_seconds);
+    state.prepare(1024);
+    state.utc_offset_seconds.store(utc_offset_seconds_at(ti.epoch_seconds));
+    auto const capacity = state.sample_buffer.capacity();
+    auto const* const storage = state.sample_buffer.data();
+
+    // A 1024-frame period, twice: the buffer the tool used to reserve at 512
+    // would have reallocated on the audio thread here.
+    std::vector<float> output_data(1024, 0.0f);
+    statusbar::audio::OutputAudioBufferFloat output_buf{std::span<float>(output_data)};
+    std::array<statusbar::audio::OutputAudioBufferFloat, 1> output_bufs{output_buf};
+    statusbar::audio::AudioCallbackParamsFloat params{
+        .input_buffers = {}, .output_buffers = std::span(output_bufs), .stream_time = 0.0};
+    EXPECT_TRUE(process_servo_callback(state, ti.epoch_seconds, params).has_value());
+    EXPECT_TRUE(process_servo_callback(state, ti.epoch_seconds + 0.02, params).has_value());
+    EXPECT_EQ(state.sample_buffer.capacity(), capacity);
+    EXPECT_TRUE(state.sample_buffer.data() == storage);
+    EXPECT_EQ(state.short_periods, 0);
+    EXPECT_EQ(state.total_samples_generated, 2048);
+
+    // A period longer than the preparation: silence past the buffer, counted,
+    // still no growth.
+    std::vector<float> long_data(2048, 1.0f);
+    statusbar::audio::OutputAudioBufferFloat long_buf{std::span<float>(long_data)};
+    std::array<statusbar::audio::OutputAudioBufferFloat, 1> long_bufs{long_buf};
+    statusbar::audio::AudioCallbackParamsFloat long_params{
+        .input_buffers = {}, .output_buffers = std::span(long_bufs), .stream_time = 0.0};
+    EXPECT_TRUE(process_servo_callback(state, ti.epoch_seconds + 0.04, long_params).has_value());
+    EXPECT_EQ(state.sample_buffer.capacity(), capacity);
+    EXPECT_TRUE(state.sample_buffer.data() == storage);
+    EXPECT_EQ(state.short_periods, 1);
+    for (size_t i = 1024; i < long_data.size(); ++i) {
+        EXPECT_EQ(long_data[i], 0.0f);
+    }
+}
+
 TEST(playback, servo_callback_stopped)
 {
     ServoGenerator servo(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);

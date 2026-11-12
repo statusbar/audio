@@ -12,11 +12,14 @@
 #include "statusbar/ltc/ltc_timecode.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace statusbar::ltc {
@@ -84,6 +87,101 @@ auto get_local_time_info() noexcept -> LocalTimeInfo
     return {.local_time = tm_local, .millis = millis, .epoch_seconds = epoch_seconds};
 }
 
+auto utc_offset_seconds_at(double epoch_seconds) noexcept -> int32_t
+{
+    auto const when = static_cast<std::time_t>(std::floor(epoch_seconds));
+    std::tm tm_local{};
+#if defined(_WIN32)
+    localtime_s(&tm_local, &when);
+    std::tm tm_utc{};
+    gmtime_s(&tm_utc, &when);
+    int32_t const local_day_seconds = (tm_local.tm_hour * 3600) + (tm_local.tm_min * 60) + tm_local.tm_sec;
+    int32_t const utc_day_seconds = (tm_utc.tm_hour * 3600) + (tm_utc.tm_min * 60) + tm_utc.tm_sec;
+    int32_t offset = local_day_seconds - utc_day_seconds;
+    if (tm_local.tm_yday != tm_utc.tm_yday) {
+        offset += (tm_local.tm_yday > tm_utc.tm_yday || tm_local.tm_year > tm_utc.tm_year) ? 86400 : -86400;
+    }
+    return offset;
+#else
+    localtime_r(&when, &tm_local);
+    return static_cast<int32_t>(tm_local.tm_gmtoff);
+#endif
+}
+
+namespace {
+
+/// The time-of-day fields of a std::tm for a second count within a day.
+auto time_of_day(int64_t day_seconds) noexcept -> std::tm
+{
+    std::tm tm_local{};
+    tm_local.tm_hour = static_cast<int>(day_seconds / 3600);
+    tm_local.tm_min = static_cast<int>((day_seconds % 3600) / 60);
+    tm_local.tm_sec = static_cast<int>(day_seconds % 60);
+    return tm_local;
+}
+
+/// Seconds into the day for a local second count, positive for any input.
+auto seconds_into_day(int64_t local_seconds) noexcept -> int64_t
+{
+    int64_t const day_seconds = local_seconds % 86400;
+    return day_seconds < 0 ? day_seconds + 86400 : day_seconds;
+}
+
+}  // namespace
+
+auto local_time_from_epoch(double epoch_seconds, int32_t utc_offset_seconds) noexcept -> LocalTimeInfo
+{
+    double const whole = std::floor(epoch_seconds);
+    int64_t const local_seconds = static_cast<int64_t>(whole) + utc_offset_seconds;
+    auto const millis = static_cast<int32_t>((epoch_seconds - whole) * 1000.0);
+    return {
+        .local_time = time_of_day(seconds_into_day(local_seconds)),
+        .millis = std::clamp<int32_t>(millis, 0, 999),
+        .epoch_seconds = epoch_seconds};
+}
+
+namespace {
+
+/// Fill @p output from the servo without growing state.sample_buffer: frames
+/// past its capacity are silence and counted in short_periods, because the
+/// audio thread may not allocate.
+auto render_servo_samples(ServoPlaybackState& state, std::span<float> output) -> void
+{
+    size_t const usable = std::min(output.size(), state.sample_buffer.capacity());
+    state.servo->get_samples(usable, state.sample_buffer);
+    std::copy_n(state.sample_buffer.begin(), usable, output.begin());
+    std::fill(output.begin() + static_cast<std::ptrdiff_t>(usable), output.end(), 0.0F);
+    if (usable < output.size()) {
+        ++state.short_periods;
+    }
+}
+
+/// Once a second: steer the servo by actual versus sample-count time, and
+/// resync the timecode from the realtime clock when it has jumped.
+auto update_servo_from_clock(ServoPlaybackState& state, std::tm const& local_time, int32_t millis, double current_epoch) -> void
+{
+    // Get expected time based on sample count
+    double const expected_time =
+        state.start_epoch + (static_cast<double>(state.total_samples_generated) / static_cast<double>(state.sample_rate));
+
+    // Update servo with actual vs expected timing
+    state.servo->update_timing(current_epoch, expected_time);
+    state.last_update_epoch = current_epoch;
+
+    // Resync from the realtime clock only when the timecode has jumped by a
+    // whole frame or more. Small drift is absorbed smoothly by the servo's
+    // rate adjustment above; a hard set_timecode mid-frame would truncate the
+    // current frame's waveform, so reserve it for a genuine discontinuity.
+    auto const rt_tc = Timecode::from_realtime(state.frame_rate, local_time, millis, state.time_offset_seconds);
+    int64_t const frame_diff =
+        static_cast<int64_t>(rt_tc.to_frame_count()) - static_cast<int64_t>(state.servo->current_timecode().to_frame_count());
+    if ((frame_diff < 0 ? -frame_diff : frame_diff) >= 2) {
+        state.servo->set_timecode(rt_tc, current_epoch);
+    }
+}
+
+}  // namespace
+
 auto process_servo_callback(
     ServoPlaybackState& state,
     std::tm const& local_time,
@@ -91,47 +189,26 @@ auto process_servo_callback(
     double current_epoch,
     audio::AudioCallbackParamsFloat const& params) -> Status
 {
-    using namespace std::chrono;
-
     if (!state.is_running()) {
         return failure(audio::AudioError::StreamNotRunning);
     }
 
-    auto frames = params.output_buffers[0].sample.size();
-
-    // Get samples from servo generator
-    state.servo->get_samples(frames, state.sample_buffer);
-
-    // Copy to output
-    for (size_t i = 0; i < frames; ++i) {
-        params.output_buffers[0].sample[i] = state.sample_buffer[i];
-    }
-
-    state.total_samples_generated += frames;
+    render_servo_samples(state, params.output_buffers[0].sample);
+    state.total_samples_generated += params.output_buffers[0].sample.size();
 
     // Check if 1 second has elapsed since last update
     if (current_epoch - state.last_update_epoch >= 1.0) {
-        // Get expected time based on sample count
-        double const expected_time =
-            state.start_epoch + (static_cast<double>(state.total_samples_generated) / static_cast<double>(state.sample_rate));
-
-        // Update servo with actual vs expected timing
-        state.servo->update_timing(current_epoch, expected_time);
-        state.last_update_epoch = current_epoch;
-
-        // Resync from the realtime clock only when the timecode has jumped by a
-        // whole frame or more. Small drift is absorbed smoothly by the servo's
-        // rate adjustment above; a hard set_timecode mid-frame would truncate the
-        // current frame's waveform, so reserve it for a genuine discontinuity.
-        auto const rt_tc = Timecode::from_realtime(state.frame_rate, local_time, millis, state.time_offset_seconds);
-        auto const& cur_tc = state.servo->current_timecode();
-        int64_t const frame_diff = static_cast<int64_t>(rt_tc.to_frame_count()) - static_cast<int64_t>(cur_tc.to_frame_count());
-        if ((frame_diff < 0 ? -frame_diff : frame_diff) >= 2) {
-            state.servo->set_timecode(rt_tc, current_epoch);
-        }
+        update_servo_from_clock(state, local_time, millis, current_epoch);
     }
 
     return success();
+}
+
+auto process_servo_callback(ServoPlaybackState& state, double current_epoch, audio::AudioCallbackParamsFloat const& params)
+    -> Status
+{
+    auto const local = local_time_from_epoch(current_epoch, state.utc_offset_seconds.load(std::memory_order_relaxed));
+    return process_servo_callback(state, local.local_time, local.millis, current_epoch, params);
 }
 
 auto process_fixed_callback(FixedPlaybackState& state, audio::AudioCallbackParamsFloat const& params) -> Status

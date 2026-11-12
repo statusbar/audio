@@ -25,6 +25,7 @@
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -305,80 +306,117 @@ int generate_to_file(Config const& config, statusbar::ltc::Generator& gen, statu
     return 0;
 }
 
+// Parse the optional HH:MM:SS time offset; nullopt (after a message) if it is malformed
+std::optional<int32_t> resolve_time_offset(Config const& config)
+{
+    if (config.time_offset.empty()) {
+        return 0;
+    }
+    auto offset = statusbar::ltc::parse_time_offset(config.time_offset);
+    if (!offset) {
+        std::println(stderr, "Error: Invalid time offset format. Use HH:MM:SS (e.g., 09:00:00)");
+        return std::nullopt;
+    }
+    std::println("Time offset: {} (maps to SMPTE 00:00:00:00)", config.time_offset);
+    return offset;
+}
+
+// A servo generator and its playback state, started from the realtime clock
+struct ServoPlayback
+{
+    ServoPlayback(
+        Config const& config,
+        statusbar::ltc::Generator::SampleRate rate,
+        int32_t time_offset_seconds,
+        statusbar::audio::OutputStream& stream)
+        : time_info(statusbar::ltc::get_local_time_info())
+        , servo_gen(rate, config.frame_rate, config.rise_time_us)
+        , state(&servo_gen, config.sample_rate, config.frame_rate, time_info.epoch_seconds, time_offset_seconds)
+    {
+        // Initialize with current realtime (with offset if specified)
+        auto initial_tc =
+            statusbar::ltc::Timecode::from_realtime(config.frame_rate, time_info.local_time, time_info.millis, time_offset_seconds);
+        servo_gen.set_timecode(initial_tc, time_info.epoch_seconds);
+        std::println("Initial timecode: {} (from CLOCK_REALTIME)", initial_tc.to_string());
+
+        // The audio callback may not allocate or call localtime_r: size the scratch
+        // buffer for the longest period the device can deliver, and hand the
+        // callback the UTC offset so it derives local time arithmetically.
+        state.prepare(std::max<size_t>(4096, 4 * static_cast<size_t>(stream.effective_period_frames())));
+        state.utc_offset_seconds.store(statusbar::ltc::utc_offset_seconds_at(time_info.epoch_seconds));
+    }
+
+    // Start the stream with the allocation-free callback; false after a message on failure
+    bool start(statusbar::audio::OutputStream& stream)
+    {
+        auto start_result = stream.start([this](statusbar::audio::AudioCallbackParamsFloat const& params) {
+            return statusbar::ltc::process_servo_callback(state, statusbar::ltc::get_realtime_timestamp(), params);
+        });
+        if (!start_result) {
+            std::println(stderr, "Error: Failed to start audio stream: {}", start_result.error().message());
+            return false;
+        }
+        std::println("Playing LTC audio from realtime clock... (press Ctrl+C to stop)");
+        return true;
+    }
+
+    // Start, report once a second until the duration is up or the stream stops, then stop
+    int run(Config const& config, statusbar::audio::OutputStream& stream)
+    {
+        if (!start(stream)) {
+            return 1;
+        }
+        monitor(config, stream);
+        stream.stop();
+        std::println("\nPlayback complete!");
+        return 0;
+    }
+
+    // Report once a second until the duration is up or the stream stops
+    void monitor(Config const& config, statusbar::audio::OutputStream& stream)
+    {
+        auto start_monotonic = std::chrono::steady_clock::now();
+        while (state.is_running() && stream.is_running()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            // Keep the callback's UTC offset current across a daylight-saving change
+            state.utc_offset_seconds.store(statusbar::ltc::utc_offset_seconds_at(statusbar::ltc::get_realtime_timestamp()));
+
+            auto elapsed = std::chrono::steady_clock::now() - start_monotonic;
+            auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            std::println(
+                "  [{:3}s] TC: {}  Servo: {:.6f}  Samples: {}  Short periods: {}",
+                elapsed_sec,
+                servo_gen.current_timecode().to_string(),
+                servo_gen.phase_adjustment(),
+                state.total_samples_generated,
+                state.short_periods);
+
+            // Check duration
+            if (elapsed_sec >= static_cast<int64_t>(config.duration_seconds)) {
+                state.set_running(false);
+                break;
+            }
+        }
+    }
+
+    statusbar::ltc::LocalTimeInfo time_info;
+    statusbar::ltc::ServoGenerator servo_gen;
+    statusbar::ltc::ServoPlaybackState state;
+};
+
 // Play LTC audio with realtime clock and servo
 int play_with_realtime_clock(
     Config const& config, statusbar::ltc::Generator::SampleRate rate, statusbar::audio::OutputStream& stream)
 {
     std::println("Mode: Realtime clock with servo compensation");
-
-    // Parse time offset if provided
-    int32_t time_offset_seconds = 0;
-    if (!config.time_offset.empty()) {
-        auto offset = statusbar::ltc::parse_time_offset(config.time_offset);
-        if (!offset) {
-            std::println(stderr, "Error: Invalid time offset format. Use HH:MM:SS (e.g., 09:00:00)");
-            return 1;
-        }
-        time_offset_seconds = *offset;
-        std::println("Time offset: {} (maps to SMPTE 00:00:00:00)", config.time_offset);
-    }
-
-    // Create servo generator
-    statusbar::ltc::ServoGenerator servo_gen(rate, config.frame_rate, config.rise_time_us);
-
-    // Initialize with current realtime (with offset if specified)
-    auto time_info = statusbar::ltc::get_local_time_info();
-    auto initial_tc =
-        statusbar::ltc::Timecode::from_realtime(config.frame_rate, time_info.local_time, time_info.millis, time_offset_seconds);
-    servo_gen.set_timecode(initial_tc, time_info.epoch_seconds);
-
-    std::println("Initial timecode: {} (from CLOCK_REALTIME)", initial_tc.to_string());
-
-    // Setup state
-    statusbar::ltc::ServoPlaybackState state(
-        &servo_gen, config.sample_rate, config.frame_rate, time_info.epoch_seconds, time_offset_seconds);
-    state.sample_buffer.reserve(512);
-
-    // Start audio playback
-    auto start_result = stream.start([&state](statusbar::audio::AudioCallbackParamsFloat const& params) {
-        auto ti = statusbar::ltc::get_local_time_info();
-        return statusbar::ltc::process_servo_callback(state, ti.local_time, ti.millis, ti.epoch_seconds, params);
-    });
-    if (!start_result) {
-        std::println(stderr, "Error: Failed to start audio stream: {}", start_result.error().message());
+    auto const time_offset_seconds = resolve_time_offset(config);
+    if (!time_offset_seconds) {
         return 1;
     }
 
-    std::println("Playing LTC audio from realtime clock... (press Ctrl+C to stop)");
-
-    // Monitor playback
-    auto start_monotonic = std::chrono::steady_clock::now();
-    while (state.is_running() && stream.is_running()) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-
-        auto elapsed = std::chrono::steady_clock::now() - start_monotonic;
-        auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-
-        // Status update every second
-        auto current_tc = servo_gen.current_timecode();
-        double phase_adj = servo_gen.phase_adjustment();
-        std::println(
-            "  [{:3}s] TC: {}  Servo: {:.6f}  Samples: {}",
-            elapsed_sec,
-            current_tc.to_string(),
-            phase_adj,
-            state.total_samples_generated);
-
-        // Check duration
-        if (elapsed_sec >= static_cast<int64_t>(config.duration_seconds)) {
-            state.set_running(false);
-            break;
-        }
-    }
-
-    stream.stop();
-    std::println("\nPlayback complete!");
-    return 0;
+    ServoPlayback playback(config, rate, *time_offset_seconds, stream);
+    return playback.run(config, stream);
 }
 
 // Play LTC audio with fixed timecode
