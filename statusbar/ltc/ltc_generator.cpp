@@ -3,99 +3,115 @@
 
 #include "statusbar/ltc/ltc_generator.hpp"
 
+#include <algorithm>
+
 namespace statusbar::ltc {
+
+namespace {
+
+/// Clamp a rise time in samples to the SMPTE 12M range (25-250 microseconds).
+auto clamp_rise_time(size_t rise_time_samples, uint32_t sample_rate) noexcept -> size_t
+{
+    size_t const min_rise = static_cast<size_t>(25.0e-6 * sample_rate);
+    size_t const max_rise = static_cast<size_t>(250.0e-6 * sample_rate);
+    return std::clamp(rise_time_samples, min_rise, max_rise);
+}
+
+}  // namespace
 
 Generator::Generator(SampleRate sample_rate, FrameRate frame_rate, double rise_time_us) noexcept
     : sample_rate_(static_cast<uint32_t>(sample_rate))
     , frame_rate_(frame_rate)
-    , rise_time_samples_(static_cast<size_t>((rise_time_us * 1e-6) * sample_rate_))
+    , frame_ratio_(frame_rate_ratio(frame_rate))
+    , rise_time_samples_(clamp_rise_time(static_cast<size_t>((rise_time_us * 1e-6) * sample_rate_), sample_rate_))
 {
-    // Calculate samples per frame based on actual frame rate
-    double const fps = actual_frame_rate(frame_rate_);
-    samples_per_frame_ = static_cast<uint32_t>(std::lround(sample_rate_ / fps));
+    // The exact frame length is sample_rate * denominator / numerator samples
+    // (1601.6 at 48 kHz / 29.97); each frame is that rounded down or up as the
+    // carry dictates, so samples_per_frame_ is the rounded-up bound.
+    uint64_t const scaled = static_cast<uint64_t>(sample_rate_) * frame_ratio_.denominator;
+    samples_per_frame_ = static_cast<uint32_t>((scaled + frame_ratio_.numerator - 1) / frame_ratio_.numerator);
 
-    // LTC bit rate is 80 bits per frame
-    // bits_per_second = 80 * fps
-    double const bits_per_second = 80.0 * fps;
-    samples_per_bit_ = sample_rate_ / bits_per_second;
+    // LTC bit rate is 80 bits per frame: bits_per_second = 80 * fps
+    samples_per_bit_ = sample_rate_ / (80.0 * actual_frame_rate(frame_rate_));
+}
 
-    // Clamp rise time to SMPTE 12M specification (25-250 microseconds)
-    size_t const min_rise = static_cast<size_t>(25.0e-6 * sample_rate_);
-    size_t const max_rise = static_cast<size_t>(250.0e-6 * sample_rate_);
-    if (rise_time_samples_ < min_rise) {
-        rise_time_samples_ = min_rise;
-    }
-    if (rise_time_samples_ > max_rise) {
-        rise_time_samples_ = max_rise;
-    }
+auto Generator::next_frame_length() noexcept -> size_t
+{
+    // Exact rational accumulation: the frame length is sample_rate * den / num
+    // samples; the remainder below one sample is carried to the next frame.
+    uint64_t const scaled = (static_cast<uint64_t>(sample_rate_) * frame_ratio_.denominator) + frame_remainder_;
+    frame_remainder_ = static_cast<uint32_t>(scaled % frame_ratio_.numerator);
+    return static_cast<size_t>(scaled / frame_ratio_.numerator);
 }
 
 auto Generator::generate_frame(Timecode const& tc, std::vector<float>& samples) -> void
 {
     LTCFrame const frame(tc);
-    samples.clear();
+    size_t const frame_length = next_frame_length();
+    EncoderState state = begin_frame(samples);
+    for (size_t bit_idx = 0; bit_idx < 80; ++bit_idx) {
+        encode_bit(frame.get_bit(bit_idx), state, samples, frame_length);
+    }
+    finish_frame(state, samples, frame_length);
+}
 
-    // Current level (-1.0 or +1.0), carried from the previous frame so the
+auto Generator::begin_frame(std::vector<float>& samples) const noexcept -> EncoderState
+{
+    samples.clear();
+    // The level (-1.0 or +1.0) is carried from the previous frame so the
     // biphase waveform is continuous across frame boundaries. With a spec-correct
     // polarity-correction bit each frame has an even transition count, so this
     // returns to last_level_ at the end and the stream never doubles a boundary
     // transition.
-    float level = last_level_;
-    float prev_level = level;
+    return EncoderState{
+        .level = last_level_,
+        .prev_level = last_level_,
+        .samples_since_transition = rise_time_samples_,  // Start settled
+        .bit_position = 0.0,
+    };
+}
 
-    // Sample position within current bit
-    double bit_position = 0.0;
+auto Generator::finish_frame(EncoderState& state, std::vector<float>& samples, size_t frame_length) noexcept -> void
+{
+    // Pad to this frame's exact length, then truncate if we generated too many.
+    emit_level(state, samples, frame_length);
+    samples.resize(frame_length);
+    last_level_ = state.level;
+}
 
-    // Track transition state for rise/fall time shaping
-    size_t samples_since_transition = rise_time_samples_;  // Start settled
-
-    // Generate samples for all 80 bits
-    for (size_t bit_idx = 0; bit_idx < 80; ++bit_idx) {
-        bool const bit_value = frame.get_bit(bit_idx);
-
-        // Biphase mark encoding:
-        // - Always transition at start of bit period
-        // - Additional transition at center if bit is 1
-        prev_level = level;
-        level = -level;  // Transition at bit start
-        samples_since_transition = 0;
-
-        // First half of bit
-        size_t const half_bit_samples = static_cast<size_t>(samples_per_bit_ / 2.0);
-        for (size_t i = 0; i < half_bit_samples; ++i) {
-            samples.push_back(apply_rise_fall(prev_level, level, samples_since_transition++));
-        }
-
-        // If bit is 1, transition at center
-        if (bit_value) {
-            prev_level = level;
-            level = -level;
-            samples_since_transition = 0;
-        }
-
-        // Second half of bit
-        for (size_t i = 0; i < half_bit_samples; ++i) {
-            samples.push_back(apply_rise_fall(prev_level, level, samples_since_transition++));
-        }
-
-        // Account for fractional samples
-        bit_position += samples_per_bit_;
-        size_t const expected_samples = static_cast<size_t>(bit_position);
-        while (samples.size() < expected_samples && samples.size() < samples_per_frame_) {
-            samples.push_back(apply_rise_fall(prev_level, level, samples_since_transition++));
-        }
+auto Generator::encode_bit(bool bit_value, EncoderState& state, std::vector<float>& samples, size_t frame_length) const -> void
+{
+    // Biphase mark encoding: always transition at the start of the bit period,
+    // and again at the centre if the bit is 1.
+    transition(state);
+    emit_half_bit(state, samples);
+    if (bit_value) {
+        transition(state);
     }
+    emit_half_bit(state, samples);
 
-    // Pad to exact frame length if needed
-    while (samples.size() < samples_per_frame_) {
-        samples.push_back(apply_rise_fall(prev_level, level, samples_since_transition++));
+    // Account for fractional samples per bit.
+    state.bit_position += samples_per_bit_;
+    emit_level(state, samples, std::min(static_cast<size_t>(state.bit_position), frame_length));
+}
+
+auto Generator::emit_half_bit(EncoderState& state, std::vector<float>& samples) const -> void
+{
+    emit_level(state, samples, samples.size() + static_cast<size_t>(samples_per_bit_ / 2.0));
+}
+
+auto Generator::transition(EncoderState& state) noexcept -> void
+{
+    state.prev_level = state.level;
+    state.level = -state.level;
+    state.samples_since_transition = 0;
+}
+
+auto Generator::emit_level(EncoderState& state, std::vector<float>& samples, size_t up_to) const -> void
+{
+    while (samples.size() < up_to) {
+        samples.push_back(apply_rise_fall(state.prev_level, state.level, state.samples_since_transition++));
     }
-
-    // Truncate if we generated too many samples
-    samples.resize(samples_per_frame_);
-
-    // Carry the ending level into the next frame for boundary continuity.
-    last_level_ = level;
 }
 
 }  // namespace statusbar::ltc

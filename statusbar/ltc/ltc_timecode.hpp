@@ -80,6 +80,36 @@ enum class FrameRate : uint8_t
     return 30.0;  // Default fallback
 }
 
+/// A frame rate as the exact ratio numerator / denominator frames per second.
+struct FrameRateRatio
+{
+    uint32_t numerator;    ///< Frames per @p denominator seconds (30000 for 29.97)
+    uint32_t denominator;  ///< Seconds (1001 for the NTSC rates, 1 otherwise)
+};
+
+/// Get the exact frame rate as a ratio, for sample-count arithmetic that must
+/// not accumulate rounding: 29.97 fps is 30000/1001, so 48 kHz carries
+/// 1601.6 samples per frame and exactly 48048 samples per 30 frames.
+/// \param rate The frame rate to query.
+[[nodiscard]] constexpr auto frame_rate_ratio(FrameRate rate) noexcept -> FrameRateRatio
+{
+    switch (rate) {
+        case FrameRate::Rate_23_976:
+            return {.numerator = 24000, .denominator = 1001};
+        case FrameRate::Rate_24:
+            return {.numerator = 24, .denominator = 1};
+        case FrameRate::Rate_25:
+            return {.numerator = 25, .denominator = 1};
+        case FrameRate::Rate_29_97_DF:
+        case FrameRate::Rate_29_97_NDF:
+            return {.numerator = 30000, .denominator = 1001};
+        case FrameRate::Rate_30_DF:
+        case FrameRate::Rate_30_NDF:
+            return {.numerator = 30, .denominator = 1};
+    }
+    return {.numerator = 30, .denominator = 1};  // Default fallback
+}
+
 /// Get a human-readable name for the frame rate.
 /// \param rate The frame rate to query.
 /// \return Display string (e.g., "29.97 fps DF", "24 fps").

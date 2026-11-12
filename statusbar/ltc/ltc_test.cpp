@@ -692,8 +692,76 @@ TEST(generator, sample_counts_29_97fps)
     Generator gen_48(Generator::SampleRate::Rate_48000, FrameRate::Rate_29_97_DF);
     EXPECT_EQ(gen_48.sample_rate(), 48000);
     // 48000 / (30000/1001) = 48000 * 1001 / 30000 = 1601.6
-    // Rounded to 1602
+    // The longest frame is 1602; the fractional 0.6 is carried frame to frame.
     EXPECT_EQ(gen_48.samples_per_frame(), 1602);
+    EXPECT_EQ(gen_48.samples_for_frames(30), 48048);
+}
+
+namespace {
+
+auto total_samples_over(Generator& gen, size_t frames) -> size_t
+{
+    Timecode tc{.hours = 0, .minutes = 0, .seconds = 0, .frames = 0, .rate = gen.frame_rate()};
+    std::vector<float> samples;
+    size_t total = 0;
+    for (size_t i = 0; i < frames; ++i) {
+        gen.generate_frame(tc, samples);
+        EXPECT_TRUE(samples.size() == gen.samples_per_frame() || samples.size() + 1 == gen.samples_per_frame());
+        total += samples.size();
+        tc.increment_frame();
+    }
+    return total;
+}
+
+}  // namespace
+
+TEST(generator, fractional_frame_length_keeps_the_rate)
+{
+    // 48 kHz / 29.97: a fixed 1602-sample frame runs at 29.963 fps and falls
+    // 0.9 s behind every hour. 30 frames must consume exactly one second of
+    // 30000/1001 fps: 48048 samples.
+    Generator gen_df(Generator::SampleRate::Rate_48000, FrameRate::Rate_29_97_DF);
+    EXPECT_EQ(total_samples_over(gen_df, 30), 48048);
+
+    // 108000 NDF frames last 108000 * 1001 / 30000 = 3603.6 s: 172972800 samples
+    // exactly, where fixed 1602-sample frames would give 173016000 (0.9 s long).
+    Generator gen_ndf(Generator::SampleRate::Rate_48000, FrameRate::Rate_29_97_NDF);
+    size_t const frames = 30 * 3600;
+    size_t const total = total_samples_over(gen_ndf, frames);
+    EXPECT_EQ(total, gen_ndf.samples_for_frames(frames));
+    EXPECT_EQ(total, 172972800);
+
+    // 23.976 at 48 kHz is 2002 samples exactly, no carry.
+    Generator gen_film(Generator::SampleRate::Rate_48000, FrameRate::Rate_23_976);
+    EXPECT_EQ(gen_film.samples_per_frame(), 2002);
+    EXPECT_EQ(total_samples_over(gen_film, 24), 48048);
+}
+
+TEST(generator, integer_frame_rates_are_unchanged)
+{
+    Generator gen_30(Generator::SampleRate::Rate_48000, FrameRate::Rate_30_NDF);
+    EXPECT_EQ(total_samples_over(gen_30, 30), 48000);
+
+    Generator gen_25(Generator::SampleRate::Rate_48000, FrameRate::Rate_25);
+    EXPECT_EQ(total_samples_over(gen_25, 25), 48000);
+
+    Generator gen_24(Generator::SampleRate::Rate_44100, FrameRate::Rate_24);
+    // 44100 / 24 = 1837.5: alternating 1837 and 1838, two frames = 3675.
+    EXPECT_EQ(gen_24.samples_per_frame(), 1838);
+    EXPECT_EQ(total_samples_over(gen_24, 48), 88200);
+}
+
+TEST(generator, reset_clears_the_fractional_carry)
+{
+    Generator gen(Generator::SampleRate::Rate_48000, FrameRate::Rate_29_97_NDF);
+    Timecode const tc{.hours = 0, .minutes = 0, .seconds = 0, .frames = 0, .rate = FrameRate::Rate_29_97_NDF};
+    std::vector<float> first;
+    std::vector<float> second;
+    gen.generate_frame(tc, first);
+    gen.reset();
+    gen.generate_frame(tc, second);
+    EXPECT_EQ(first.size(), second.size());
+    EXPECT_EQ(first.size(), 1601);
 }
 
 TEST(generator, output_length)
@@ -1554,8 +1622,10 @@ TEST(generator, all_sample_rates)
             samples.reserve(gen.samples_per_frame());
             gen.generate_frame(tc, samples);
 
-            // Should generate correct number of samples
-            EXPECT_EQ(samples.size(), gen.samples_per_frame());
+            // The frame is the exact length rounded down or up; never longer
+            // than samples_per_frame() (the reservation bound).
+            EXPECT_TRUE(samples.size() == gen.samples_per_frame() || samples.size() + 1 == gen.samples_per_frame());
+            EXPECT_TRUE(samples.size() >= static_cast<size_t>(gen.sample_rate() / actual_frame_rate(fr)));
 
             // All samples should be in valid range
             for (float sample : samples) {

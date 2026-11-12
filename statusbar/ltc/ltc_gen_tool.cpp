@@ -219,6 +219,77 @@ void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const&
     std::println("  For example, --time-offset=09:00:00 means 9:00 AM = TC 00:00:00:00.");
 }
 
+// Writes frames of float samples to a stream as 16-bit PCM or raw float
+struct FrameSink
+{
+    FrameSink(std::ofstream& out, bool wav, size_t samples_per_frame)
+        : output(out)
+        , is_wav(wav)
+    {
+        int16_samples.reserve(samples_per_frame);
+    }
+
+    void write(std::vector<float> const& samples)
+    {
+        if (!is_wav) {
+            statusbar::stream_write(output, samples);
+            return;
+        }
+        int16_samples.clear();
+        for (float sample : samples) {
+            int16_samples.push_back(float_to_int16(sample));
+        }
+        statusbar::stream_write(output, int16_samples);
+    }
+
+    std::ofstream& output;
+    bool is_wav;
+    std::vector<int16_t> int16_samples;
+};
+
+// Write the WAV header (if any) and every frame of the run to the open output
+void write_ltc_file(
+    Config const& config, statusbar::ltc::Generator& gen, statusbar::ltc::Timecode tc, size_t total_frames, std::ofstream& output)
+{
+    bool const is_wav = config.format == OutputFormat::Wav16;
+    // The WAV header carries the exact sample count: frames at a fractional
+    // rate (29.97) alternate between two lengths, so it is not a multiple of
+    // samples_per_frame().
+    if (is_wav) {
+        write_wav_header(output, config.sample_rate, static_cast<uint32_t>(gen.samples_for_frames(total_frames)));
+    }
+
+    FrameSink sink(output, is_wav, gen.samples_per_frame());
+    std::vector<float> frame_samples(gen.samples_per_frame());
+    uint8_t const fps = statusbar::ltc::frames_per_second(config.frame_rate);
+    for (size_t frame_idx = 0; frame_idx < total_frames; ++frame_idx) {
+        gen.generate_frame(tc, frame_samples);
+        sink.write(frame_samples);
+        tc.increment_frame();
+        if ((frame_idx + 1) % fps == 0) {
+            std::println("  Progress: {:.1f}%", (frame_idx + 1) * 100.0 / total_frames);
+        }
+    }
+}
+
+// Report the written file and how to open it
+void report_generated_file(Config const& config)
+{
+    auto file_size = std::filesystem::file_size(config.output_file);
+    std::println("\nGeneration complete!");
+    std::println("  File size: {} bytes ({:.2f} MB)", file_size, file_size / (1024.0 * 1024.0));
+
+    if (config.format == OutputFormat::Wav16) {
+        std::println("\nWAV file ready!");
+        std::println("  Format: 16-bit PCM, mono, {} Hz", config.sample_rate);
+        std::println("  Open directly in any audio software.");
+    } else {
+        std::println("\nTo import into Audacity:");
+        std::println("  1. File > Import > Raw Data...");
+        std::println("  2. Select: 32-bit float, Little-endian, 1 channel, {} Hz", config.sample_rate);
+    }
+}
+
 // Generate LTC to file
 int generate_to_file(Config const& config, statusbar::ltc::Generator& gen, statusbar::ltc::Timecode tc, size_t total_frames)
 {
@@ -228,66 +299,9 @@ int generate_to_file(Config const& config, statusbar::ltc::Generator& gen, statu
         return 1;
     }
 
-    bool const is_wav = config.format == OutputFormat::Wav16;
-    size_t const samples_per_frame = gen.samples_per_frame();
-    size_t const total_samples = total_frames * samples_per_frame;
-
-    // Write WAV header if needed (will write placeholder, then update at end)
-    if (is_wav) {
-        write_wav_header(output, config.sample_rate, static_cast<uint32_t>(total_samples));
-    }
-
-    // Generate samples frame by frame
-    std::vector<float> frame_samples;
-    frame_samples.reserve(samples_per_frame);
-
-    // Buffer for 16-bit samples when writing WAV
-    std::vector<int16_t> int16_samples;
-    if (is_wav) {
-        int16_samples.reserve(samples_per_frame);
-    }
-
-    auto write_frame_samples = [&](std::vector<float> const& samples) {
-        if (is_wav) {
-            int16_samples.clear();
-            for (float sample : samples) {
-                int16_samples.push_back(float_to_int16(sample));
-            }
-            statusbar::stream_write(output, int16_samples);
-        } else {
-            statusbar::stream_write(output, samples);
-        }
-    };
-
-    for (size_t frame_idx = 0; frame_idx < total_frames; ++frame_idx) {
-        gen.generate_frame(tc, frame_samples);
-        write_frame_samples(frame_samples);
-        tc.increment_frame();
-
-        uint8_t fps = statusbar::ltc::frames_per_second(config.frame_rate);
-        if ((frame_idx + 1) % fps == 0) {
-            double progress = (frame_idx + 1) * 100.0 / total_frames;
-            std::println("  Progress: {:.1f}%", progress);
-        }
-    }
-
+    write_ltc_file(config, gen, tc, total_frames, output);
     output.close();
-
-    // Report file size
-    auto file_size = std::filesystem::file_size(config.output_file);
-    std::println("\nGeneration complete!");
-    std::println("  File size: {} bytes ({:.2f} MB)", file_size, file_size / (1024.0 * 1024.0));
-
-    if (is_wav) {
-        std::println("\nWAV file ready!");
-        std::println("  Format: 16-bit PCM, mono, {} Hz", config.sample_rate);
-        std::println("  Open directly in any audio software.");
-    } else {
-        std::println("\nTo import into Audacity:");
-        std::println("  1. File > Import > Raw Data...");
-        std::println("  2. Select: 32-bit float, Little-endian, 1 channel, {} Hz", config.sample_rate);
-    }
-
+    report_generated_file(config);
     return 0;
 }
 
@@ -431,7 +445,7 @@ GenerationInfo calculate_generation_info(Config const& config, statusbar::ltc::G
     info.samples_per_frame = gen.samples_per_frame();
     double fps = statusbar::ltc::actual_frame_rate(config.frame_rate);
     info.total_frames = static_cast<size_t>(config.duration_seconds * fps + 0.5);
-    info.total_samples = info.total_frames * info.samples_per_frame;
+    info.total_samples = static_cast<size_t>(gen.samples_for_frames(info.total_frames));
     return info;
 }
 
